@@ -6,7 +6,7 @@ const H = 150;
 const PAD = { l: 34, r: 10, t: 12, b: 22 };
 const LIMIT = 60;
 
-export function renderChart(root, { values, marks, current, openingPlies, onSelect }) {
+export function renderChart(root, { values, marks, current, openingPlies, onSelect, engine = null }) {
   const n = values.length;
   const x = (i) => PAD.l + (n > 1 ? (i / (n - 1)) * (W - PAD.l - PAD.r) : 0);
   const y = (v) => PAD.t + ((LIMIT - Math.max(-LIMIT, Math.min(LIMIT, v))) / (2 * LIMIT)) * (H - PAD.t - PAD.b);
@@ -30,6 +30,11 @@ export function renderChart(root, { values, marks, current, openingPlies, onSele
     svg += `<path class="c-area down" d="${area}" clip-path="url(#below)"/>`;
     svg += `<polyline class="c-line" points="${pts.join(' ')}"/>`;
   }
+  // Engine evaluation (pawns x10, so ±6 pawns spans the chart).
+  if (engine && engine.length > 1) {
+    const ep = engine.map((v, i) => `${x(i).toFixed(1)},${y(v / 10).toFixed(1)}`);
+    svg += `<polyline class="c-engine" points="${ep.join(' ')}"/>`;
+  }
   for (const { index, label } of marks) {
     svg += `<circle class="c-dot ${label}" cx="${x(index)}" cy="${y(values[index])}" r="3.2"/>`;
   }
@@ -46,4 +51,29 @@ export function renderChart(root, { values, marks, current, openingPlies, onSele
     const i = Math.round(((px - PAD.l) / (W - PAD.l - PAD.r)) * (n - 1));
     onSelect(Math.max(0, Math.min(n - 1, i)));
   });
+}
+
+// Small multi-series line chart returned as SVG markup.
+// series: [{ values: [number|null], cls, dots?: boolean }], all sharing the x axis.
+export function miniChart({ series, yLimit = 40, xLabel = (i) => i, xTicks = [], height = 220, zeroLabel = '0' }) {
+  const w = 640;
+  const pad = { l: 40, r: 12, t: 10, b: 26 };
+  const n = Math.max(...series.map((s) => s.values.length), 2);
+  const x = (i) => pad.l + (i / (n - 1)) * (w - pad.l - pad.r);
+  const y = (v) => pad.t + ((yLimit - Math.max(-yLimit, Math.min(yLimit, v))) / (2 * yLimit)) * (height - pad.t - pad.b);
+  let svg = `<svg viewBox="0 0 ${w} ${height}" role="img">`;
+  for (const t of [-yLimit / 2, 0, yLimit / 2]) {
+    svg += `<line class="c-grid${t === 0 ? ' zero' : ''}" x1="${pad.l}" x2="${w - pad.r}" y1="${y(t)}" y2="${y(t)}"/>`;
+    svg += `<text class="c-label m" x="${pad.l - 6}" y="${y(t) + 3}" text-anchor="end">${t === 0 ? zeroLabel : (t > 0 ? '+' : '') + t}</text>`;
+  }
+  for (const i of xTicks) if (i < n) svg += `<text class="c-label m" x="${x(i)}" y="${height - 6}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}">${xLabel(i)}</text>`;
+  for (const s of series) {
+    if (s.dots) {
+      s.values.forEach((v, i) => { if (v !== null) svg += `<circle class="m-dot ${s.cls}" cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="3"/>`; });
+    } else {
+      const pts = s.values.map((v, i) => (v === null ? null : `${x(i).toFixed(1)},${y(v).toFixed(1)}`)).filter(Boolean);
+      if (pts.length > 1) svg += `<polyline class="m-line ${s.cls}" points="${pts.join(' ')}"/>`;
+    }
+  }
+  return svg + '</svg>';
 }
