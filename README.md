@@ -35,6 +35,14 @@ The app has four screens, switched from the tab bar: **Play** (Stockfish), **Rev
 - **Your patterns**: your games split by habit (castled by move 10, 3+ minors out by move 8, early queen, repeated piece moves, early edge pawns). You can compare your board dominance and score with and without each habit, so you learn which principles matter *for you*, from your own games.
 - **Trainer**: positions from your games where a much more dominating move existed. Find it on the board and see how your choice ranks.
 
+### Learn: a course of skills
+
+Chess comes down to skills and fundamentals, and those can be taught. The **Learn** tab is a course of 15 skills in five groups: tactics (hanging pieces, defending, forks, pins and skewers, discovered attacks, trapping pieces), checkmates (patterns, attacking the king), opening fundamentals (centre, development, king safety), middlegame (piece activity, punishing opening mistakes) and endgames (pawn and rook endgames).
+
+- **Your path** puts the skills behind your biggest weaknesses first ("Up next"), and explains why from your games.
+- **Each skill** has a short lesson with a worked example (a puzzle, or your own mistake shown next to the better move), then exercises, then an *apply it* game against Stockfish. A skill is mastered when every step is done: lesson read; 80% of the last 12+ exercises right at Level 2 or above; the matching positions from your own games drilled; and the skill test passed (a game without a blunder, castling by move 10, holding the board at move 12, or no slips, depending on the skill).
+- **Exercises** for tactics and endgames come from a themed set of 1,080 well-tested puzzles from the Lichess puzzle database (CC0, `vendor/puzzles.json`), across four rating levels. Three right in a row moves you up a level, two misses move you down, and missed puzzles come back a few exercises later. Opening and middlegame skills use positions from your own games.
+
 ### What's holding you back, drills and practice
 
 - **Insights → What to fix** ranks the patterns costing you the most: habits (early queen, repeated piece moves, edge pawns, not castling, slow development), recurring mistakes (pieces left en prise, blocked bishops, knights on the rim, losing castling rights), your weakest opening, the phase where you blunder most and winning positions you didn't convert. Each comes with evidence from your games, a lesson, examples, a drill and a practice game.

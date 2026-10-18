@@ -14,6 +14,7 @@ import { SAMPLES } from './samples.js';
 import { Engine, formatScore, uciToMove } from './engine.js';
 import { PlaySession, LEVELS, PUNISH, sideName } from './play.js';
 import { CaptureSession } from './capture.js';
+import { SKILLS, GROUPS, skillById, learningPath, puzzlesFor, newSkillProgress, nextPuzzle, recordPuzzle, skillStatus, applyPassed, LEVELS as SKILL_LEVELS } from './curriculum.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -39,6 +40,7 @@ const state = {
   drill: null, // drill session
   practice: null, // focus for the current Stockfish game
   capture: null, // over-the-board recording
+  learn: null, // open skill: { id, view: 'skill' | 'lesson' | 'puzzle', card, puzzle }
   captureMe: 'w',
   setup: { color: 'w', level: 'club', punish: 'mistakes', ...store.get('play', {}) },
   play: null,
@@ -86,6 +88,7 @@ function view() {
     return { fen, analysis: analysisFor(fen), assessment: null, move: last ? { from: last.from, to: last.to, san: last.san, color: last.color, fullmove: c.moveNumber() - (last.color === 'b' ? 1 : 0) } : null };
   }
   if (state.screen === 'play') return state.play ? state.play.positions[playCursor()] : emptyView();
+  if (state.screen === 'train' && state.learn && state.learn.position) return state.learn.position;
   if (state.screen === 'train') return state.drill && state.drill.position ? state.drill.position : emptyView();
   if (state.variation) return state.variation.positions[state.variation.cursor];
   const g = currentGame();
@@ -97,6 +100,7 @@ function view() {
 
 function userColor() {
   if (state.screen === 'play') return state.play ? state.play.userColor : state.setup.color === 'b' ? 'b' : 'w';
+  if (state.screen === 'train' && state.learn && state.learn.color) return state.learn.color;
   if (state.screen === 'train' && state.drill && state.drill.item) return state.drill.item.color;
   const g = currentGame();
   return g ? g.userColor : 'w';
@@ -106,6 +110,7 @@ function userColor() {
 const board = new Board($('board'), { onMove: handleBoardMove });
 
 function handleBoardMove(m) {
+  if (state.screen === 'train' && state.learn) return answerPuzzle(m);
   if (state.screen === 'train') return answerDrill(m);
   if (state.screen === 'play' && state.capture) {
     if (state.capture.step === 'recording') state.capture.play(m);
@@ -226,7 +231,7 @@ function render() {
   document.querySelectorAll('#tabs [data-screen]').forEach((b) => b.setAttribute('aria-current', String(b.dataset.screen === state.screen)));
   document.body.dataset.screen = state.screen;
   // The board only shows when there is something on it.
-  const showStage = state.screen === 'play' ? !!state.play || !!(state.capture && ['recording', 'done'].includes(state.capture.step)) : state.screen === 'train' ? !!(state.drill && state.drill.item) : state.screen === 'review' ? !!currentGame() : false;
+  const showStage = state.screen === 'play' ? !!state.play || !!(state.capture && ['recording', 'done'].includes(state.capture.step)) : state.screen === 'train' ? !!((state.learn && state.learn.position) || (state.drill && state.drill.item)) : state.screen === 'review' ? !!currentGame() : false;
   $('stage').hidden = !showStage;
   if (showStage) renderStage();
   renderPanel();
@@ -249,6 +254,11 @@ function renderStage() {
       if (state.hint.dom) arrows.push({ ...state.hint.dom, kind: 'dom' });
       if (state.hint.engine) arrows.push({ ...state.hint.engine, kind: 'best' });
     }
+  } else if (state.screen === 'train' && state.learn) {
+    const L = state.learn;
+    const pz = L.view === 'puzzle' && L.puzzle;
+    if (pz && !pz.result && !pz.busy) legal = chess.moves({ verbose: true });
+    if (L.arrows) arrows.push(...L.arrows);
   } else if (state.screen === 'train') {
     const d = state.drill;
     if (d && d.item && !d.answer && !d.judging) legal = chess.moves({ verbose: true });
@@ -289,7 +299,7 @@ function renderStage() {
   // Navigation label and availability.
   let label = 'Start';
   if (v.move) label = `${moveNo(v.move)} ${v.move.san}`;
-  if (state.screen === 'train') label = state.drill ? `${state.drill.right}/${state.drill.done} solved` : '';
+  if (state.screen === 'train') label = state.learn ? (state.learn.view === 'puzzle' ? SKILL_LEVELS[learnSkill(state.learn.id).level].text : 'Example') : state.drill ? `${state.drill.right}/${state.drill.done} solved` : '';
   $('nav-pos').textContent = label;
   const navigable = state.screen === 'review' || (state.screen === 'play' && state.play && !state.capture);
   document.querySelector('.boardbar').classList.toggle('no-nav', !navigable);
@@ -310,6 +320,11 @@ function stageHead() {
     if (!state.play) return '<div class="who"><b>Stockfish</b><span>Pick your settings below</span></div>';
     const s = state.play;
     return `<div class="who"><b>Stockfish · ${esc(s.level.text)}</b><span>${s.punish.key === 'always' ? 'Full strength' : 'Punishes ' + (s.punish.key === 'mistakes' ? 'mistakes' : 'inaccuracies')} · you play ${sideName(s.userColor)}</span></div>`;
+  }
+  if (state.screen === 'train' && state.learn && state.learn.position) {
+    const L = state.learn;
+    const sk = skillById(L.id);
+    return `<div class="who"><b>${esc(sk.title)} \u00b7 ${sideName(L.color)} to move</b><span>${L.view === 'puzzle' ? esc(sk.prompt) : 'Worked example'}</span></div>`;
   }
   if (state.screen === 'train') {
     const d = state.drill;
@@ -429,8 +444,20 @@ function playPanel() {
   if (pr) {
     const slips = s.positions.filter((x) => x.move && x.move.color === s.userColor && isSlip(pr, x.move, x.analysis));
     const lastSlip = userPos && slips.includes(userPos);
-    focus = `<div class="focus-bar"><span><b>Practising</b> ${esc(pr.focus)}</span><span class="${slips.length ? 'neg' : 'pos'}">${slips.length} slip${slips.length === 1 ? '' : 's'}</span></div>`;
+    const counts = pr.tag || pr.tags || pr.habit;
+    const blunders = s.positions.filter((x) => x.move && x.move.color === s.userColor && x.engine && x.engine.grade.key === 'blunder').length;
+    const tally = counts ? `<span class="${slips.length ? 'neg' : 'pos'}">${slips.length} slip${slips.length === 1 ? '' : 's'}</span>` : pr.skill ? `<span class="${blunders ? 'neg' : 'pos'}">${blunders} blunder${blunders === 1 ? '' : 's'}</span>` : '';
+    focus = `<div class="focus-bar"><span><b>${pr.skill ? 'Skill test' : 'Practising'}</b> ${esc(pr.focus)}</span>${tally}</div>`;
     if (lastSlip) focus += `<div class="punish"><b>Slip: ${esc(pr.title)}</b><span>${esc(pr.lesson || '')}</span></div>`;
+    if (!playActive() && pr.skill && !pr.applyResult) {
+      pr.applyResult = applyPassed(skillById(pr.skill), s.positions, s.userColor);
+      const sp = learnSkill(pr.skill);
+      if (pr.applyResult.passed) { sp.apply = { passed: true, t: Date.now() }; saveLearn(); }
+    }
+    if (pr.applyResult) {
+      end = end.replace('</h2>', `</h2><p class="${pr.applyResult.passed ? 'trend-up' : 'neg'}"><b>${pr.applyResult.passed ? 'Skill test passed.' : 'Not passed yet.'}</b> ${esc(pr.applyResult.reason)}</p>`)
+        .replace('<div class="actions">', '<div class="actions"><button type="button" class="btn" data-action="backToSkill">Back to the skill</button>');
+    }
     if (!playActive() && !pr.logged && pr.key !== 'drill') {
       pr.logged = true;
       (practiceLog[pr.key] ||= []).push({ t: Date.now(), slips: slips.length, result: s.resigned ? 'loss' : s.result() });
@@ -892,6 +919,262 @@ function problemMapView(mistakes) {
   </section>`;
 }
 
+// ---------- Learn ----------
+let PUZZLES = {};
+fetch(new URL('../vendor/puzzles.json', import.meta.url)).then((r) => r.json()).then((d) => { PUZZLES = d; if (state.screen === 'train') render(); }).catch(() => {});
+const learnProgress = { round: 0, skills: {}, ...store.get('learn', {}) };
+const saveLearn = () => store.set('learn', learnProgress);
+function learnSkill(id) {
+  learnProgress.skills[id] ||= newSkillProgress();
+  return learnProgress.skills[id];
+}
+
+function skillState(skill, mistakes) {
+  const filter = skill.drill;
+  const drills = filter && mistakes.some((m) => drillMatches(m, filter)) ? mastery(mistakes, drillProgress, filter) : null;
+  return skillStatus(skill, learnSkill(skill.id), drills);
+}
+
+function learnHome() {
+  const mistakes = myMistakes();
+  const { ws } = weaknessData();
+  const path = learningPath(ws, mistakes.length ? problemMap(mistakes).rows : []);
+  const states = Object.fromEntries(SKILLS.map((sk) => [sk.id, skillState(sk, mistakes)]));
+  const next = path.find((x) => states[x.skill.id].state !== 'mastered');
+  const mastered = SKILLS.filter((sk) => states[sk.id].state === 'mastered').length;
+  const pillFor = (st) => (st.state === 'mastered' ? pill('dominant', 'Mastered') : st.state === 'learning' ? pill('passive', `${st.done}/${st.total}`) : '<span class="small muted">New</span>');
+  const nextCard = next ? `<article class="setup up-next"><span class="label">Up next</span><h2>${esc(next.skill.title)}</h2>
+      ${next.reason ? (next.reason.kind === 'problem' ? `<p>${esc(next.reason.evidence[0])}</p>` : `<p>Because of <b>${esc(next.reason.title.toLowerCase())}</b> in your games. ${esc(next.reason.evidence[0])}</p>`) : `<p>${esc(next.skill.lesson[0][1])}</p>`}
+      <div class="meter"><span style="width:${Math.round((100 * states[next.skill.id].done) / states[next.skill.id].total)}%"></span></div>
+      <button type="button" class="btn primary wide" data-action="openSkill" data-skill="${next.skill.id}">${states[next.skill.id].done ? 'Continue' : 'Start'}</button></article>` : '<article class="result win"><h2>Every skill mastered</h2><p>Keep playing and importing games. New weaknesses will show up here.</p></article>';
+  const order = path.map((x) => x.skill.id);
+  const groups = GROUPS.map((g) => {
+    const list = SKILLS.filter((sk) => sk.group === g.key).sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
+    return `<section class="block"><h3>${g.text}</h3><ul class="rows">${list.map((sk) => `<li style="padding:0;border:0"><button type="button" data-action="openSkill" data-skill="${sk.id}"><div class="row-head"><b>${esc(sk.title)}</b>${pillFor(states[sk.id])}</div></button></li>`).join('')}</ul></section>`;
+  }).join('');
+  const drillLine = mistakes.length ? `<section class="block"><h3>Your positions</h3><p class="muted small">${mistakes.length} positions from your games where you went wrong, with spaced repetition.</p><button type="button" class="btn wide" data-action="openDrills">Open drills</button></section>` : '';
+  return `<p class="context">Your course \u00b7 ${mastered} of ${SKILLS.length} skills mastered</p>${nextCard}${groups}${drillLine}`;
+}
+
+function openSkill(id, view = 'skill') {
+  state.drill = null;
+  state.learn = { id, view, card: 0 };
+  setScreen('train');
+}
+
+function skillPanel() {
+  const L = state.learn;
+  const skill = skillById(L.id);
+  if (L.view === 'lesson') return lessonPanel(skill);
+  if (L.view === 'puzzle') return puzzlePanel(skill);
+  const mistakes = myMistakes();
+  const st = skillState(skill, mistakes);
+  const { ws } = weaknessData();
+  const reason = learningPath(ws).find((x) => x.skill.id === skill.id).reason;
+  const buttons = {
+    lesson: `<button type="button" class="btn small" data-action="skillLesson">${learnSkill(skill.id).lesson ? 'Read again' : 'Read'}</button>`,
+    exercises: skill.source === 'puzzles' ? '<button type="button" class="btn small primary" data-action="skillPuzzles">Exercises</button>' : (skill.drill && mistakes.some((m) => drillMatches(m, skill.drill)) ? `<button type="button" class="btn small primary" data-action="startDrill" ${filterAttrs(skill.drill)} data-label="${esc(skill.title)}">Drill</button>` : '<span class="small muted">Import or play games first</span>'),
+    yours: skill.drill ? `<button type="button" class="btn small" data-action="startDrill" ${filterAttrs(skill.drill)} data-label="${esc(skill.title)}">Drill</button>` : '',
+    apply: '<button type="button" class="btn small" data-action="skillApply">Play</button>',
+  };
+  return `<button type="button" class="back" data-action="learnHome">\u2039 Your course</button>
+    <article class="setup"><h2>${esc(skill.title)}</h2>
+      ${reason ? `<p>${esc(reason.evidence.join(' '))}</p>` : `<p>${esc(skill.lesson[0][1])}</p>`}
+      <ol class="steps">${st.steps.map((x) => `<li class="${x.done ? 'done' : ''}"><span class="tick" aria-hidden="true">${x.done ? '\u2713' : ''}</span><span class="step-text"><b>${esc(x.text)}</b>${x.detail ? `<small>${esc(x.detail)}</small>` : ''}</span>${buttons[x.key] || ''}</li>`).join('')}</ol>
+      ${st.state === 'mastered' ? '<p class="trend-up"><b>Mastered.</b> Exercises still come back now and then to keep it fresh.</p>' : ''}
+    </article>`;
+}
+
+// Worked example for a lesson: a puzzle for tactics, your own mistake for fundamentals.
+function lessonExample(skill) {
+  if (skill.source === 'puzzles') {
+    const pz = puzzlesFor(PUZZLES, skill).sort((a, b) => a.rating - b.rating)[0];
+    if (!pz) return null;
+    const c = new Chess(pz.fen);
+    const setup = c.move(uciToMove(pz.moves[0]));
+    const sol = new Chess(c.fen()).move(uciToMove(pz.moves[1]));
+    return { fen: c.fen(), color: c.turn(), last: setup, best: sol, text: `The idea here is <b class="mono">${esc(sol.san)}</b>.` };
+  }
+  const m = myMistakes().filter((x) => drillMatches(x, skill.drill)).sort((a, b) => b.cost - a.cost)[0];
+  if (!m) return null;
+  const best = new Chess(m.fen).move(m.accept[0]);
+  const played = new Chess(m.fen).move(m.san);
+  return { fen: m.fen, color: m.color, played, best, text: `From your game: you played <b class="mono">${esc(m.san)}</b> (grey). <b class="mono">${esc(best.san)}</b> (green) was better.` };
+}
+
+function lessonPanel(skill) {
+  const L = state.learn;
+  const cards = skill.lesson;
+  const i = Math.min(L.card, cards.length - 1);
+  const [title, text] = cards[i];
+  const ex = L.example;
+  const last = i === cards.length - 1;
+  return `<button type="button" class="back" data-action="skillHome">\u2039 ${esc(skill.title)}</button>
+    <article class="lesson"><span class="label">Lesson \u00b7 ${i + 1} of ${cards.length}</span><h2>${esc(title)}</h2><p>${esc(text)}</p>
+      ${ex && last ? `<p class="small">${ex.text}${ex.played ? '' : ' <button type="button" class="btn small" data-action="showIdea">Show it</button>'}</p>` : ''}
+      <div class="dots">${cards.map((_, k) => `<i class="${k === i ? 'on' : ''}"></i>`).join('')}</div>
+      <div class="action-bar">${i ? '<button type="button" class="btn" data-action="lessonPrev">Back</button>' : ''}${last ? `<button type="button" class="btn primary" data-action="lessonDone">${skill.source === 'puzzles' ? 'Try exercises' : 'Done'}</button>` : '<button type="button" class="btn primary" data-action="lessonNext">Next</button>'}</div>
+    </article>`;
+}
+
+function showLessonExample() {
+  const L = state.learn;
+  const skill = skillById(L.id);
+  const ex = lessonExample(skill);
+  L.example = ex;
+  if (!ex) { L.position = null; return; }
+  L.color = ex.color;
+  L.position = { fen: ex.fen, analysis: analysisFor(ex.fen), assessment: null, move: ex.last ? { from: ex.last.from, to: ex.last.to } : null };
+  L.arrows = ex.played ? [{ from: ex.played.from, to: ex.played.to, kind: 'played' }, { from: ex.best.from, to: ex.best.to, kind: 'best' }] : [];
+}
+
+function puzzlePanel(skill) {
+  const L = state.learn;
+  const pz = L.puzzle;
+  const sp = learnSkill(skill.id);
+  const right = sp.recent.filter(Boolean).length;
+  const meta = `<p class="small muted">${SKILL_LEVELS[sp.level].text} \u00b7 ${right}/${sp.recent.length} of your recent answers right \u00b7 puzzle rated ${pz ? pz.p.rating : '\u2013'}</p>`;
+  const back = `<button type="button" class="back" data-action="skillHome">\u2039 ${esc(skill.title)}</button>`;
+  if (!pz) return `${back}<article class="empty-card"><p>Loading exercises\u2026</p></article>`;
+  if (!pz.result) {
+    return `${back}<article class="verdict"><p class="v-line">${esc(skill.prompt)}${pz.step > 0 ? ' Keep going.' : ''}</p>${why(`<p>${esc(skill.lesson[skill.lesson.length > 1 ? 1 : 0][1])}</p>`, 'Hint')}</article>${meta}
+      <div class="action-bar"><button type="button" class="btn" data-action="puzzleSkip">Skip</button></div>`;
+  }
+  const ok = pz.result === 'solved';
+  return `${back}<article class="verdict tone-${ok ? 'dominant' : 'mistake'}">
+      <div class="v-head">${pill(ok ? 'dominant' : 'mistake', ok ? 'Solved' : 'Not quite')}${pz.levelChange ? `<span class="v-meta">${pz.levelChange > 0 ? 'Level up' : 'Level down'}</span>` : ''}</div>
+      <p class="v-line">${ok ? 'That\u2019s it.' : `The move was <b class="mono">${esc(pz.expectedSan)}</b> (green arrow).`} ${!ok ? 'It will come back in a few exercises.' : ''}</p>
+    </article>${meta}
+    <div class="action-bar"><button type="button" class="btn primary" data-action="puzzleNext">Next exercise</button>${!ok && !pz.shown ? '<button type="button" class="btn" data-action="puzzleShow">Show solution</button>' : ''}</div>`;
+}
+
+function loadPuzzle() {
+  const L = state.learn;
+  const skill = skillById(L.id);
+  const sp = learnSkill(skill.id);
+  const list = puzzlesFor(PUZZLES, skill);
+  const p = nextPuzzle(list, sp, learnProgress.round);
+  L.arrows = [];
+  if (!p) { L.puzzle = null; L.position = null; render(); return; }
+  const chess = new Chess(p.fen);
+  const setup = chess.move(uciToMove(p.moves[0]));
+  L.color = chess.turn();
+  L.puzzle = { p, chess, step: 1, result: null, levelBefore: sp.level };
+  L.position = { fen: chess.fen(), analysis: analysisFor(chess.fen()), assessment: null, move: { from: setup.from, to: setup.to } };
+  board.clearSelection();
+  render();
+}
+
+function setPuzzlePosition(chess, last) {
+  const fen = chess.fen();
+  state.learn.position = { fen, analysis: analysisFor(fen), assessment: null, move: last ? { from: last.from, to: last.to } : null };
+}
+
+function finishPuzzle(ok) {
+  const L = state.learn;
+  const pz = L.puzzle;
+  const sp = learnSkill(L.id);
+  recordPuzzle(sp, pz.p, ok, learnProgress.round++);
+  saveLearn();
+  pz.result = ok ? 'solved' : 'failed';
+  pz.levelChange = sp.level - pz.levelBefore;
+}
+
+function answerPuzzle(m) {
+  const L = state.learn;
+  const pz = L && L.puzzle;
+  if (!pz || pz.result || pz.busy) return;
+  const expected = pz.p.moves[pz.step];
+  const before = new Chess(pz.chess.fen());
+  const move = pz.chess.move({ from: m.from, to: m.to, promotion: m.promotion || 'q' });
+  const exact = move.from + move.to === expected.slice(0, 4) && (!expected[4] || move.promotion === expected[4]);
+  if (!exact && !pz.chess.isCheckmate()) {
+    pz.chess.undo();
+    const exp = before.move(uciToMove(expected));
+    pz.expectedSan = exp.san;
+    L.arrows = [{ from: exp.from, to: exp.to, kind: 'best' }, { from: move.from, to: move.to, kind: 'played' }];
+    finishPuzzle(false);
+    render();
+    return;
+  }
+  setPuzzlePosition(pz.chess, move);
+  pz.step++;
+  if (pz.step >= pz.p.moves.length || pz.chess.isCheckmate()) {
+    finishPuzzle(true);
+    render();
+    return;
+  }
+  // Opponent's reply, then your next move.
+  pz.busy = true;
+  render();
+  setTimeout(() => {
+    if (state.learn !== L || L.puzzle !== pz) return;
+    const reply = pz.chess.move(uciToMove(pz.p.moves[pz.step]));
+    pz.step++;
+    pz.busy = false;
+    setPuzzlePosition(pz.chess, reply);
+    render();
+  }, 450);
+}
+
+function showSolution() {
+  const L = state.learn;
+  const pz = L.puzzle;
+  pz.shown = true;
+  const c = new Chess(pz.p.fen);
+  const moves = pz.p.moves.map((u) => c.move(uciToMove(u)));
+  let k = 1;
+  const stepOnce = () => {
+    if (state.learn !== L || L.puzzle !== pz || k > moves.length) return;
+    const replay = new Chess(pz.p.fen);
+    for (let j = 0; j < k; j++) replay.move(moves[j].san);
+    setPuzzlePosition(replay, moves[k - 1]);
+    L.arrows = [];
+    render();
+    k++;
+    setTimeout(stepOnce, 700);
+  };
+  stepOnce();
+}
+
+const LEARN_ACTIONS = {
+  openSkill: (b) => openSkill(b.dataset.skill),
+  learnHome: () => { state.learn = null; render(); },
+  openDrills: () => { state.learn = null; state.showDrills = true; render(); },
+  skillHome: () => { const L = state.learn; state.learn = { id: L.id, view: 'skill', card: 0 }; render(); },
+  skillLesson: () => { state.learn.view = 'lesson'; state.learn.card = 0; state.learn.position = null; state.learn.arrows = []; render(); },
+  lessonNext: () => {
+    const L = state.learn;
+    L.card++;
+    if (L.card === skillById(L.id).lesson.length - 1) showLessonExample();
+    render();
+  },
+  lessonPrev: () => { const L = state.learn; L.card = Math.max(0, L.card - 1); L.position = null; render(); },
+  lessonDone: () => {
+    const L = state.learn;
+    learnSkill(L.id).lesson = true;
+    saveLearn();
+    if (skillById(L.id).source === 'puzzles') { L.view = 'puzzle'; loadPuzzle(); } else { LEARN_ACTIONS.skillHome(); }
+  },
+  showIdea: () => {
+    const L = state.learn;
+    const ex = L.example;
+    if (!ex || !ex.best) return;
+    L.arrows = [{ from: ex.best.from, to: ex.best.to, kind: 'best' }];
+    render();
+  },
+  skillPuzzles: () => { state.learn.view = 'puzzle'; loadPuzzle(); },
+  puzzleNext: loadPuzzle,
+  puzzleSkip: loadPuzzle,
+  puzzleShow: showSolution,
+  skillApply: () => {
+    const skill = skillById(state.learn.id);
+    const a = skill.apply;
+    startGame({ practice: { key: `skill:${skill.id}`, skill: skill.id, title: skill.title, focus: a.focus, lesson: skill.lesson[0][1], tags: a.tags || null, habit: a.kind === 'castle' ? 'castle' : null } });
+  },
+  backToSkill: () => { const id = state.practice && state.practice.skill; state.play = null; state.practice = null; if (id) openSkill(id); },
+};
+
 // ---------- Drills ----------
 let drillProgress = { ...newProgress(), ...store.get('drills', {}) };
 const saveDrills = () => store.set('drills', drillProgress);
@@ -901,7 +1184,10 @@ function myMistakes() {
 }
 
 function trainPanel() {
-  return state.drill && state.drill.item ? drillSession() : drillsHome();
+  if (state.drill && state.drill.item) return drillSession();
+  if (state.learn) return skillPanel();
+  if (state.showDrills || state.drillDone) return `<button type="button" class="back" data-action="closeDrills">\u2039 Your course</button>${drillsHome()}`;
+  return learnHome();
 }
 
 function drillsHome() {
@@ -929,6 +1215,7 @@ function drillsHome() {
 
 function startDrill(b) {
   const filter = filterFromEl(b);
+  if (state.learn) { state.learn.position = null; state.learn.arrows = []; }
   state.drill = { filter, label: b.dataset.label || 'Drill', done: 0, right: 0, streak: 0, recent: [], wasMastered: mastery(myMistakes(), drillProgress, filter).mastered };
   state.drillDone = null;
   setScreen('train');
@@ -1087,6 +1374,8 @@ async function reviewPlayed() {
 
 const ACTIONS = {
   ...CAPTURE_ACTIONS,
+  ...LEARN_ACTIONS,
+  closeDrills: () => { state.showDrills = false; state.drillDone = null; render(); },
   startGame,
   newGame: () => { state.play = null; state.practice = null; render(); },
   hint: showHint,

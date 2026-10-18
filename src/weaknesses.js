@@ -185,6 +185,7 @@ export function findWeaknesses(facts, openings) {
 export function isSlip(practice, move, analysisAfter) {
   if (!practice) return false;
   if (practice.tag && move.tags && move.tags.includes(practice.tag)) return true;
+  if (practice.tags && move.tags && move.tags.some((t) => practice.tags.includes(t))) return true;
   const me = analysisAfter && analysisAfter[move.color];
   if (practice.habit === 'castle' && me && move.fullmove === 10 && !me.castled) return true;
   if (practice.habit === 'develop' && me && move.fullmove === 8 && me.developed < 3) return true;
