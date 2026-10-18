@@ -5,12 +5,15 @@ import { splitPgn, fetchLichess, fetchChessCom, TIME_CLASSES } from './import.js
 import { Collection, OPENING_MOVES } from './collection.js';
 import { Board } from './board.js';
 import { renderChart, miniChart } from './chart.js';
-import { gameFacts, aggregate, filterFacts } from './stats.js';
+import { gameFacts, aggregate, filterFacts, PIECES } from './stats.js';
+import { findWeaknesses, isSlip, MIN_GAMES } from './weaknesses.js';
+import { collectMistakes, problemMap, newProgress, nextDrill, recordAnswer, mastery, matches as drillMatches, FUNDAMENTALS, PHASES } from './drills.js';
 import { checkGame, NAG } from './enginecheck.js';
 import { engineGrade } from './play.js';
 import { SAMPLES } from './samples.js';
 import { Engine, formatScore, uciToMove } from './engine.js';
 import { PlaySession, LEVELS, PUNISH, sideName } from './play.js';
+import { CaptureSession } from './capture.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -32,12 +35,15 @@ const state = {
   showBest: store.get('showBest', true),
   why: store.get('why', false),
   flipped: false,
-  insights: 'game',
+  insights: 'fix',
+  drill: null, // drill session
+  practice: null, // focus for the current Stockfish game
+  capture: null, // over-the-board recording
+  captureMe: 'w',
   setup: { color: 'w', level: 'club', punish: 'mistakes', ...store.get('play', {}) },
   play: null,
   playIndex: null, // null follows the live position
   hint: null,
-  quiz: null,
   importMsg: { text: '', error: false },
   statsFilter: { color: 'all', timeClass: 'all' },
   gamesFilter: null, // opening key shown in the games sheet
@@ -73,8 +79,14 @@ const canMoveInPlay = () => playLive() && !state.play.thinking && playActive() &
 const emptyView = () => ({ fen: START_FEN, analysis: analysisFor(START_FEN), assessment: null, move: null });
 
 function view() {
+  if (state.screen === 'play' && state.capture) {
+    const c = state.capture.chess;
+    const fen = c.fen();
+    const last = c.history({ verbose: true }).pop();
+    return { fen, analysis: analysisFor(fen), assessment: null, move: last ? { from: last.from, to: last.to, san: last.san, color: last.color, fullmove: c.moveNumber() - (last.color === 'b' ? 1 : 0) } : null };
+  }
   if (state.screen === 'play') return state.play ? state.play.positions[playCursor()] : emptyView();
-  if (state.screen === 'train') return state.quiz ? state.quiz.position : emptyView();
+  if (state.screen === 'train') return state.drill && state.drill.position ? state.drill.position : emptyView();
   if (state.variation) return state.variation.positions[state.variation.cursor];
   const g = currentGame();
   if (!g || !g.game) return emptyView();
@@ -85,7 +97,7 @@ function view() {
 
 function userColor() {
   if (state.screen === 'play') return state.play ? state.play.userColor : state.setup.color === 'b' ? 'b' : 'w';
-  if (state.screen === 'train' && state.quiz) return state.quiz.items[state.quiz.i].game.userColor;
+  if (state.screen === 'train' && state.drill && state.drill.item) return state.drill.item.color;
   const g = currentGame();
   return g ? g.userColor : 'w';
 }
@@ -94,7 +106,11 @@ function userColor() {
 const board = new Board($('board'), { onMove: handleBoardMove });
 
 function handleBoardMove(m) {
-  if (state.screen === 'train') return answerQuiz(m);
+  if (state.screen === 'train') return answerDrill(m);
+  if (state.screen === 'play' && state.capture) {
+    if (state.capture.step === 'recording') state.capture.play(m);
+    return;
+  }
   if (state.screen === 'play') {
     if (!canMoveInPlay()) return;
     state.hint = null;
@@ -210,7 +226,7 @@ function render() {
   document.querySelectorAll('#tabs [data-screen]').forEach((b) => b.setAttribute('aria-current', String(b.dataset.screen === state.screen)));
   document.body.dataset.screen = state.screen;
   // The board only shows when there is something on it.
-  const showStage = state.screen === 'play' ? !!state.play : state.screen === 'train' ? !!state.quiz : state.screen === 'review' ? !!currentGame() : false;
+  const showStage = state.screen === 'play' ? !!state.play || !!(state.capture && ['recording', 'done'].includes(state.capture.step)) : state.screen === 'train' ? !!(state.drill && state.drill.item) : state.screen === 'review' ? !!currentGame() : false;
   $('stage').hidden = !showStage;
   if (showStage) renderStage();
   renderPanel();
@@ -225,15 +241,18 @@ function renderStage() {
   let legal = null;
   const chess = new Chess(v.fen);
 
-  if (state.screen === 'play') {
+  if (state.screen === 'play' && state.capture) {
+    if (state.capture.step === 'recording') legal = chess.moves({ verbose: true });
+  } else if (state.screen === 'play') {
     if (canMoveInPlay()) legal = chess.moves({ verbose: true });
     if (state.hint && playLive()) {
       if (state.hint.dom) arrows.push({ ...state.hint.dom, kind: 'dom' });
       if (state.hint.engine) arrows.push({ ...state.hint.engine, kind: 'best' });
     }
   } else if (state.screen === 'train') {
-    if (state.quiz && !state.quiz.answer) legal = chess.moves({ verbose: true });
-    if (state.quiz && state.quiz.answer) arrows.push({ ...state.quiz.answer.best, kind: 'best' });
+    const d = state.drill;
+    if (d && d.item && !d.answer && !d.judging) legal = chess.moves({ verbose: true });
+    if (d && d.answer && !d.answer.correct && d.answer.bestMove) arrows.push({ ...d.answer.bestMove, kind: 'best' });
   } else {
     const g = currentGame();
     if (g && g.game) legal = chess.moves({ verbose: true });
@@ -270,9 +289,9 @@ function renderStage() {
   // Navigation label and availability.
   let label = 'Start';
   if (v.move) label = `${moveNo(v.move)} ${v.move.san}`;
-  if (state.screen === 'train') label = state.quiz ? `${state.quiz.i + 1} of ${state.quiz.items.length}` : '';
+  if (state.screen === 'train') label = state.drill ? `${state.drill.right}/${state.drill.done} solved` : '';
   $('nav-pos').textContent = label;
-  const navigable = state.screen === 'review' || (state.screen === 'play' && state.play);
+  const navigable = state.screen === 'review' || (state.screen === 'play' && state.play && !state.capture);
   document.querySelector('.boardbar').classList.toggle('no-nav', !navigable);
 
   $('stage-head').innerHTML = stageHead();
@@ -283,16 +302,20 @@ function renderStage() {
 }
 
 function stageHead() {
+  if (state.screen === 'play' && state.capture) {
+    const c = state.capture.chess;
+    return `<div class="who"><b>Recording a board game</b><span>${c.history().length} moves \u00b7 ${sideName(c.turn())} to move</span></div>`;
+  }
   if (state.screen === 'play') {
     if (!state.play) return '<div class="who"><b>Stockfish</b><span>Pick your settings below</span></div>';
     const s = state.play;
     return `<div class="who"><b>Stockfish · ${esc(s.level.text)}</b><span>${s.punish.key === 'always' ? 'Full strength' : 'Punishes ' + (s.punish.key === 'mistakes' ? 'mistakes' : 'inaccuracies')} · you play ${sideName(s.userColor)}</span></div>`;
   }
   if (state.screen === 'train') {
-    if (!state.quiz) return '<div class="who"><b>Trainer</b><span>Positions from your games</span></div>';
-    const item = state.quiz.items[state.quiz.i];
-    const h = item.game.headers;
-    return `<div class="who"><b>${sideName(item.ply.color)} to move</b><span>${esc(h.White || '?')} vs ${esc(h.Black || '?')}, move ${item.ply.fullmove}</span></div>`;
+    const d = state.drill;
+    if (!d || !d.item) return '<div class="who"><b>Drills</b><span>Positions from your games</span></div>';
+    const h = d.item.game.headers;
+    return `<div class="who"><b>${esc(d.label)} \u00b7 ${sideName(d.item.color)} to move</b><span>${esc(h.White || '?')} vs ${esc(h.Black || '?')}, move ${d.item.fullmove}${d.streak > 1 ? ` \u00b7 ${d.streak} in a row` : ''}</span></div>`;
   }
   const g = currentGame();
   if (state.variation) {
@@ -309,6 +332,8 @@ function renderPanel() {
   const el = $('panel');
   const html = { play: playPanel, review: reviewPanel, insights: insightsPanel, train: trainPanel }[state.screen]();
   el.innerHTML = html;
+  const slot = $('cam-slot');
+  if (slot && state.capture) slot.append(state.capture.el);
   bindPanel(el);
 }
 
@@ -323,6 +348,7 @@ function bindPanel(el) {
         if (key === 'insights') state.insights = b.dataset.value;
         else if (key === 'statColor') state.statsFilter.color = b.dataset.value;
         else if (key === 'statTime') state.statsFilter.timeClass = b.dataset.value;
+        else if (key === 'captureMe') state.captureMe = b.dataset.value;
         else {
           state.setup[group.dataset.group] = b.dataset.value;
           store.set('play', state.setup);
@@ -337,6 +363,7 @@ function bindPanel(el) {
 
 // ---------- Play ----------
 function playPanel() {
+  if (state.capture) return capturePanel();
   const s = state.play;
   if (!s) return playSetup();
   const live = playLive();
@@ -397,8 +424,26 @@ function playPanel() {
     hint = `<p class="hint-line">${h.engine ? `<i class="sw best"></i>Engine: <b class="mono">${esc(h.engine.san)}</b>` : ''}${h.dom && (!h.engine || h.dom.san !== h.engine.san) ? ` <i class="sw dom"></i>Most dominating: <b class="mono">${esc(h.dom.san)}</b>` : ''}</p>`;
   }
 
+  let focus = '';
+  const pr = state.practice;
+  if (pr) {
+    const slips = s.positions.filter((x) => x.move && x.move.color === s.userColor && isSlip(pr, x.move, x.analysis));
+    const lastSlip = userPos && slips.includes(userPos);
+    focus = `<div class="focus-bar"><span><b>Practising</b> ${esc(pr.focus)}</span><span class="${slips.length ? 'neg' : 'pos'}">${slips.length} slip${slips.length === 1 ? '' : 's'}</span></div>`;
+    if (lastSlip) focus += `<div class="punish"><b>Slip: ${esc(pr.title)}</b><span>${esc(pr.lesson || '')}</span></div>`;
+    if (!playActive() && !pr.logged && pr.key !== 'drill') {
+      pr.logged = true;
+      (practiceLog[pr.key] ||= []).push({ t: Date.now(), slips: slips.length, result: s.resigned ? 'loss' : s.result() });
+      store.set('practiceLog', practiceLog);
+    }
+    if (!playActive()) {
+      const more = pr.positions && pr.index + 1 < pr.positions.length;
+      end = end.replace('</h2>', `</h2><p>${slips.length ? `${slips.length} slip${slips.length > 1 ? 's' : ''} on <b>${esc(pr.focus.toLowerCase())}</b> this game.` : `No slips on <b>${esc(pr.focus.toLowerCase())}</b>. Well played.`}</p>`)
+        .replace('<div class="actions">', `<div class="actions">${more ? `<button type="button" class="btn primary" data-action="nextPosition">Next position (${pr.index + 2} of ${pr.positions.length})</button>` : ''}`);
+    }
+  }
   const plies = s.positions.slice(1).map((p) => ({ ...p.move, dot: p.move.punished ? 'punished' : p.engine ? p.engine.grade.tone : null }));
-  return `${end}${status}${card}${hint}${actions}${moveStrip(plies, idx)}`;
+  return `${focus}${end}${status}${card}${hint}${actions}${moveStrip(plies, idx)}`;
 }
 
 function playSetup() {
@@ -414,14 +459,19 @@ function playSetup() {
     inaccuracies: 'Goes full strength after anything that loses half a pawn or more.',
     always: 'Full strength every move. Hard mode.',
   }[state.setup.punish];
-  return `<article class="setup">
+  const { ws } = weaknessData();
+  const weak = ws.length ? `<article class="setup"><h2>Practise your weak spots</h2>
+      <ul class="rows">${ws.slice(0, 3).map((w, i) => `<li><div class="row-head"><b>${esc(w.title)}</b></div><span class="small muted">${esc(w.practice.focus || 'Start from your opening position')}</span>${practiceHistory(w.key)}<div class="actions"><button type="button" class="btn small primary" data-action="practise" data-weak="${i}">Practise</button></div></li>`).join('')}</ul>
+    </article>` : '';
+  const record = `<article class="setup"><h2>Record a game on a real board</h2><p>Prop your phone above the board and play. The camera follows the moves and gives you the PGN to analyse.</p><button type="button" class="btn wide" data-action="startCapture">Start recording</button></article>`;
+  return `${weak}<article class="setup">
     <h2>Play Stockfish</h2>
     <div class="field"><span class="label">Play as</span>${chipGroup('color', [{ value: 'w', text: 'White' }, { value: 'b', text: 'Black' }, { value: 'r', text: 'Random' }], state.setup.color)}</div>
     <div class="field"><span class="label">Opponent</span>${chipGroup('level', levels, state.setup.level)}</div>
     <div class="field"><span class="label">Punish</span>${chipGroup('punish', punish, state.setup.punish)}<p class="note">${punishNote}</p></div>
     <button type="button" class="btn primary wide" data-action="startGame">Start game</button>
     <p class="status ${state.engineError ? 'error' : ''}" id="play-status">${state.engineError ? esc(state.engineError) : ''}</p>
-  </article>`;
+  </article>${record}`;
 }
 
 // ---------- Review ----------
@@ -539,8 +589,9 @@ function labelBar(counts) {
 
 function insightsPanel() {
   const own = games.games.filter((g) => g.report);
-  const tabs = chipGroup('insights', [{ value: 'game', text: 'This game' }, { value: 'all', text: `All games${own.length ? ` (${own.length})` : ''}` }], state.insights);
-  return `<div class="insights">${tabs}${state.insights === 'game' ? gameInsights() : allInsights(own)}</div>`;
+  const tabs = chipGroup('insights', [{ value: 'fix', text: 'What to fix' }, { value: 'game', text: 'This game' }, { value: 'all', text: `All games${own.length ? ` (${own.length})` : ''}` }], state.insights);
+  const body = state.insights === 'fix' ? fixInsights() : state.insights === 'game' ? gameInsights() : allInsights(own);
+  return `<div class="insights">${tabs}${body}</div>`;
 }
 
 function gameInsights() {
@@ -673,82 +724,329 @@ function allInsights(own) {
   return `${filters}${tiles}${trend}${slip}${openings}${principles}${pieces}${habits}${engineSec}`;
 }
 
-// ---------- Train ----------
-function quizItems() {
-  const items = [];
-  for (const g of games.games) {
-    if (!g.game) continue;
-    for (const p of g.game.plies) if (p.color === g.userColor && p.label && p.gap > 6 && p.fullmove <= 15) items.push({ game: g, ply: p });
+// ---------- Over-the-board capture ----------
+function capturePanel() {
+  const c = state.capture;
+  if (c.error) return `<article class="empty-card"><h2>Camera unavailable</h2><p>${esc(c.error)}</p><button type="button" class="btn wide" data-action="captureCancel">Back</button></article>`;
+  if (c.step === 'camera') return '<article class="verdict"><p class="v-line"><span class="thinking">Starting the camera</span></p></article><div id="cam-slot"></div>';
+  if (c.step === 'corners') {
+    return `<article class="verdict"><p class="v-line">Tap the outer corner of <b class="mono">${c.nextCorner}</b> (${c.corners.length + 1} of 4).</p>
+      <p class="small muted">Hold the phone steady above the board so all 64 squares are visible. Corners in order: a8, h8, h1, a1. a1 is the dark corner on White\u2019s left.</p>${c.status ? `<p class="small neg">${esc(c.status)}</p>` : ''}</article>
+      <div id="cam-slot"></div>
+      <div class="action-bar"><button type="button" class="btn" data-action="captureRedo" ${c.corners.length ? '' : 'disabled'}>Redo corners</button><button type="button" class="btn" data-action="captureCancel">Cancel</button></div>`;
   }
-  for (let i = items.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [items[i], items[j]] = [items[j], items[i]];
+  if (c.step === 'confirm') {
+    return `<article class="verdict"><p class="v-line">Check the green grid sits on the squares, with a1 and h8 in the right corners. Then set up the pieces.</p>
+      <div class="field"><span class="label">You are playing</span>${chipGroup('captureMe', [{ value: 'w', text: 'White' }, { value: 'b', text: 'Black' }, { value: 'none', text: 'Just recording' }], state.captureMe)}</div></article>
+      <div id="cam-slot"></div>
+      <div class="action-bar"><button type="button" class="btn primary" data-action="captureStart">Start recording</button><button type="button" class="btn" data-action="captureRedo">Redo corners</button></div>`;
   }
-  return items;
+  const hist = c.chess.history({ verbose: true });
+  const plies = hist.map((m, i) => ({ san: m.san, color: m.color, fullmove: Math.floor(i / 2) + 1 }));
+  if (c.step === 'done') {
+    const pgn = c.pgn(captureNames());
+    return `<article class="result"><h2>Game recorded</h2><p>${hist.length} moves. Copy the PGN or analyse it straight away.</p>
+      <textarea id="capture-pgn" rows="6" readonly>${esc(pgn)}</textarea>
+      <div class="actions"><button type="button" class="btn primary" data-action="captureAnalyse">Analyse this game</button><button type="button" class="btn" data-action="captureCopy">Copy PGN</button><button type="button" class="btn" data-action="captureCancel">Close</button></div>
+      <p class="status" id="copy-status"></p></article>${moveStrip(plies, -1)}`;
+  }
+  const ask = c.candidates
+    ? `<article class="verdict tone-passive"><p class="v-line">${esc(c.status)}</p>${c.candidates.length ? `<div class="chips">${c.candidates.map((x, i) => `<button type="button" data-action="capturePick" data-i="${i}">${esc(x.move.san)}</button>`).join('')}</div>` : ''}<p class="small muted">Or play the move on the board above.</p><button type="button" class="btn small" data-action="captureDismiss">Nothing was played</button></article>`
+    : `<div class="status-row"><span class="${c.status === 'Hand over the board' ? 'thinking' : ''}">${esc(c.status)}</span><span class="small muted">Missed one? Play it on the board above.</span></div>`;
+  return `${ask}<div id="cam-slot" class="small-cam"></div>${moveStrip(plies, plies.length)}
+    <div class="action-bar"><button type="button" class="btn" data-action="captureUndo" ${hist.length ? '' : 'disabled'}>Undo move</button><button type="button" class="btn primary" data-action="captureFinish">Finish</button></div>`;
+}
+
+function captureNames() {
+  const me = state.username || 'You';
+  if (state.captureMe === 'w') return { white: me, black: 'Opponent' };
+  if (state.captureMe === 'b') return { white: 'Opponent', black: me };
+  return { white: 'White', black: 'Black' };
+}
+
+const CAPTURE_ACTIONS = {
+  startCapture: () => {
+    if (state.check) state.check.cancelled = true;
+    state.capture = new CaptureSession({ onChange: () => { if (state.screen === 'play') render(); } });
+    state.flipped = false;
+    render();
+    state.capture.open();
+  },
+  captureRedo: () => state.capture.redoCorners(),
+  captureStart: () => state.capture.start(),
+  capturePick: (b) => { const x = state.capture.candidates[Number(b.dataset.i)]; if (x) state.capture.play(x.move); },
+  captureDismiss: () => state.capture.dismiss(),
+  captureUndo: () => state.capture.undo(),
+  captureFinish: () => state.capture.finish(),
+  captureCancel: () => { state.capture.close(); state.capture = null; render(); },
+  captureCopy: () => {
+    const t = $('capture-pgn');
+    const done = (ok) => { const s = $('copy-status'); if (s) s.textContent = ok ? 'Copied.' : 'Select the text above and copy it.'; };
+    try {
+      navigator.clipboard.writeText(t.value).then(() => done(true), () => { t.select(); done(false); });
+    } catch {
+      t.select();
+      done(false);
+    }
+  },
+  captureAnalyse: async () => {
+    const c = state.capture;
+    const me = state.captureMe === 'none' ? null : state.captureMe;
+    const pgn = c.pgn(captureNames());
+    state.capture = null;
+    const r = await games.add([pgn], { userColor: me });
+    if (r.added[0]) selectGame(games.games.indexOf(r.added[0]));
+    setScreen('review');
+  },
+};
+
+// ---------- What to fix ----------
+const practiceLog = store.get('practiceLog', {});
+
+function weaknessData() {
+  const own = games.games.filter((g) => g.report && !g.sample);
+  const pool = own.length ? own : games.games.filter((g) => g.report);
+  const facts = pool.map(gameFacts);
+  const ws = facts.length >= MIN_GAMES ? findWeaknesses(facts, aggregate(facts).openings) : [];
+  state.weakRows = ws;
+  return { pool, facts, ws };
+}
+
+function drillFilterFor(w) {
+  const p = w.practice;
+  if (w.kind === 'opening') return { games: [...new Set(w.examples.map((e) => e.game.key))], phase: 'opening' };
+  if (w.key.startsWith('blunders:')) return { fundamental: 'tactics', phase: w.key.split(':')[1] };
+  if (w.key === 'convert') return { games: [...new Set(w.examples.map((e) => e.game.key))] };
+  if (p.tag) return { tag: p.tag };
+  if (p.habit === 'castle') return { fundamental: 'king' };
+  if (p.habit === 'develop') return { fundamental: 'development', phase: 'opening' };
+  return null;
+}
+
+const filterAttrs = (f) => (f ? Object.entries(f).map(([k, v]) => `data-${k}="${esc(Array.isArray(v) ? v.join('|') : v)}"`).join(' ') : '');
+const filterFromEl = (b) => {
+  const f = {};
+  for (const k of ['fundamental', 'piece', 'phase', 'tag']) if (b.dataset[k]) f[k] = b.dataset[k];
+  if (b.dataset.games) f.games = b.dataset.games.split('|');
+  return f;
+};
+
+function practiceHistory(key) {
+  const log = practiceLog[key];
+  if (!log || !log.length) return '';
+  const first = log[0].slips;
+  const last = log[log.length - 1].slips;
+  return `<p class="small ${last < first ? 'trend-up' : 'muted'}">Practised ${log.length}× · slips ${first} → ${last}</p>`;
+}
+
+function weaknessCard(w, i, mistakes) {
+  const filter = drillFilterFor(w);
+  const n = filter ? mistakes.filter((m) => drillMatches(m, filter)).length : 0;
+  const m = filter && n ? mastery(mistakes, drillProgress, filter) : null;
+  return `<li class="weak">
+    <div class="weak-head"><span class="rank">${i + 1}</span><b>${esc(w.title)}</b></div>
+    ${w.evidence.map((e) => `<p class="small muted">${esc(e)}</p>`).join('')}
+    ${m ? `<div class="meter"><span style="width:${Math.round(m.share * 100)}%"></span></div><p class="small muted">${m.mastered ? '<b class="trend-up">Mastered</b>' : `${m.solid} of ${m.total} drill positions solid`}${m.accuracy !== null ? ` · ${pct(m.accuracy)} recent accuracy` : ''}</p>` : ''}
+    ${practiceHistory(w.key)}
+    ${why(`<p>${esc(w.lesson)}</p>`, 'Lesson')}
+    <div class="actions">
+      ${n ? `<button type="button" class="btn primary" data-action="startDrill" ${filterAttrs(filter)} data-label="${esc(w.title)}">Drill ${n}</button>` : ''}
+      <button type="button" class="btn${n ? '' : ' primary'}" data-action="practise" data-weak="${i}">Practise vs Stockfish</button>
+      <button type="button" class="btn" data-action="examples" data-weak="${i}">Examples</button>
+    </div>
+  </li>`;
+}
+
+function fixInsights() {
+  const { facts, ws } = weaknessData();
+  if (facts.length < MIN_GAMES) {
+    return `<article class="empty-card"><h2>Find what’s holding you back</h2><p>With at least ${MIN_GAMES} analysed games, this ranks the patterns costing you the most and turns each one into drills and practice games.</p><button type="button" class="btn primary wide" data-action="openImport">Import games</button></article>`;
+  }
+  const mistakes = myMistakes();
+  const top = ws.slice(0, 3);
+  const rest = ws.slice(3);
+  const unchecked = facts.filter((f) => !f.game.engine).length;
+  const cards = ws.length
+    ? `<section class="block"><h3>Fix these first</h3><ol class="weaks">${top.map((w, i) => weaknessCard(w, i, mistakes)).join('')}</ol>
+       ${rest.length ? why(`<ol class="weaks">${rest.map((w, i) => weaknessCard(w, i + 3, mistakes)).join('')}</ol>`, `${rest.length} more to work on`) : ''}</section>`
+    : '<article class="empty-card"><p>No clear weak spots stand out yet. Keep importing games, or check them with Stockfish below.</p></article>';
+  const engineNote = unchecked ? `<section class="block"><p class="muted small">${unchecked} game${unchecked > 1 ? 's aren’t' : ' isn’t'} checked by Stockfish yet. Checked games add tactics, blunder timing and unconverted wins to this list.</p>${checkBar(facts.filter((f) => !f.game.engine).map((f) => f.game).slice(0, 10), `Check ${Math.min(10, unchecked)} games`, unchecked)}</section>` : '';
+  return `${cards}${problemMapView(mistakes)}${engineNote}`;
+}
+
+function problemMapView(mistakes) {
+  if (!mistakes.length) return '';
+  const map = problemMap(mistakes);
+  const phases = Object.keys(PHASES);
+  const rows = map.rows.filter((r) => r.n);
+  return `<section class="block"><h3>Problem map</h3><p class="muted small">Your costly moves by fundamental and phase. Darker means more board or evaluation lost. Tap a square to drill it.</p>
+    <div class="pmap" role="table">
+      <span></span>${phases.map((ph) => `<span class="ph" role="columnheader">${PHASES[ph].text}</span>`).join('')}
+      ${rows.map((r) => `<span class="fund" role="rowheader">${esc(r.text)}</span>${phases.map((ph) => {
+        const c = r.cells[ph];
+        return c.n ? `<button type="button" class="cell" style="--h:${(0.12 + 0.88 * c.cost / map.max).toFixed(2)}" data-action="startDrill" data-fundamental="${r.key}" data-phase="${ph}" data-label="${esc(`${r.text}, ${PHASES[ph].text.toLowerCase()}`)}" aria-label="${c.n} ${esc(r.text)} mistakes in the ${ph}">${c.n}</button>` : '<span class="cell empty">·</span>';
+      }).join('')}`).join('')}
+    </div>
+    <p class="label" style="margin-top:6px">By piece</p>
+    <div class="chips">${map.pieces.map((pc) => `<button type="button" data-action="startDrill" data-piece="${pc.piece}" data-label="${esc(pc.name)} moves">${esc(pc.name)}<small>${pc.n}</small></button>`).join('')}</div>
+  </section>`;
+}
+
+// ---------- Drills ----------
+let drillProgress = { ...newProgress(), ...store.get('drills', {}) };
+const saveDrills = () => store.set('drills', drillProgress);
+function myMistakes() {
+  const own = games.games.filter((g) => g.game && !g.sample);
+  return collectMistakes(own.length ? own : games.games.filter((g) => g.game));
 }
 
 function trainPanel() {
-  const q = state.quiz;
-  if (!q) {
-    const n = quizItems().length;
-    return `<article class="setup"><h2>Find the dominating move</h2>
-      <p>Positions from your own games where a much stronger grip on the board was available. Make your move and see how it ranks.</p>
-      ${n ? `<button type="button" class="btn primary wide" data-action="startQuiz">Start · ${n} positions</button>` : '<p class="muted">Import or play a few games first. Positions appear when a move of yours was graded Passive or worse.</p><button type="button" class="btn wide" data-action="openImport">Import games</button>'}
-    </article>`;
+  return state.drill && state.drill.item ? drillSession() : drillsHome();
+}
+
+function drillsHome() {
+  const mistakes = myMistakes();
+  if (!mistakes.length) {
+    return `<article class="setup"><h2>Drills</h2><p>Import or play a few games first. Every costly move you make becomes a position to drill until you get it right.</p><button type="button" class="btn primary wide" data-action="openImport">Import games</button></article>`;
   }
-  const item = q.items[q.i];
-  if (!q.answer) {
-    return `<article class="verdict"><p class="v-line">Which move takes the most board from your opponent? Try the <b>Freedom</b> overlay to see their safe squares.</p></article>
-      <div class="action-bar"><button type="button" class="btn" data-action="skipQuiz">Skip</button><button type="button" class="btn" data-action="stopQuiz">Stop</button></div>`;
-  }
-  const a = q.answer;
-  return `<article class="verdict tone-${a.label}">
-      <div class="v-head"><span class="v-move mono">${esc(a.san)}</span>${pill(a.label, LABELS[a.label].text)}<span class="v-meta">#${a.rank} of ${a.total}</span></div>
-      <p class="v-line">Best: <b class="mono">${esc(a.best.san)}</b> · in the game: <b class="mono">${esc(item.ply.san)}</b> (#${item.ply.rank})</p>
-      ${why(`<p>${describeDeltas(a.deltas)}</p>${tagList(a.tags)}`)}
+  const all = mastery(mistakes, drillProgress);
+  const fund = Object.keys(FUNDAMENTALS).map((k) => ({ k, m: mastery(mistakes, drillProgress, { fundamental: k }) })).filter((x) => x.m.total);
+  const done = state.drillDone ? `<article class="result win"><h2>${state.drillDone.mastered ? 'Mastered!' : 'Session done'}</h2><p>${state.drillDone.right} of ${state.drillDone.done} solved${state.drillDone.mastered ? `. You’ve mastered ${esc(state.drillDone.label)}.` : '.'}</p></article>` : '';
+  return `${done}<article class="setup"><h2>Drills</h2>
+      <p>Positions from your games where you went wrong. Find a better move; Stockfish judges it. Missed positions come back soon, solved ones later, until you get them right three rounds running.</p>
+      <div class="meter"><span style="width:${Math.round(all.share * 100)}%"></span></div>
+      <p class="small muted">${all.solid} of ${all.total} positions solid${all.accuracy !== null ? ` · ${pct(all.accuracy)} recent accuracy` : ''}</p>
+      <button type="button" class="btn primary wide" data-action="startDrill" data-label="Mixed drill">Start mixed drill</button>
     </article>
-    <div class="action-bar"><button type="button" class="btn primary" data-action="nextQuiz">Next position</button><button type="button" class="btn" data-action="stopQuiz">Stop</button></div>`;
+    <section class="block"><h3>By fundamental</h3><ul class="rows">${fund.map(({ k, m }) => `<li style="padding:0;border:0"><button type="button" data-action="startDrill" data-fundamental="${k}" data-label="${esc(FUNDAMENTALS[k].text)}">
+      <div class="row-head"><b>${esc(FUNDAMENTALS[k].text)}</b><span class="small ${m.mastered ? 'trend-up' : 'muted'}">${m.mastered ? 'Mastered' : `${m.solid}/${m.total} solid`}</span></div>
+      <div class="meter"><span style="width:${Math.round(m.share * 100)}%"></span></div>
+      ${m.accuracy !== null ? `<span class="small muted">${pct(m.accuracy)} of your last ${m.attempts} answers right</span>` : '<span class="small muted">Not started</span>'}
+    </button></li>`).join('')}</ul></section>
+    <section class="block"><h3>By phase</h3><div class="chips">${Object.keys(PHASES).map((ph) => { const n = mistakes.filter((m) => m.phase === ph).length; return n ? `<button type="button" data-action="startDrill" data-phase="${ph}" data-label="${PHASES[ph].text}">${PHASES[ph].text}<small>${n}</small></button>` : ''; }).join('')}</div></section>
+    <section class="block"><h3>By piece</h3><div class="chips">${Object.keys(PIECES).map((pc) => { const n = mistakes.filter((m) => m.piece === pc).length; return n ? `<button type="button" data-action="startDrill" data-piece="${pc}" data-label="${PIECES[pc]} moves">${PIECES[pc]}<small>${n}</small></button>` : ''; }).join('')}</div></section>`;
 }
 
-function startQuiz() {
-  const items = quizItems();
-  if (!items.length) return;
-  state.quiz = { items, i: 0, answer: null, position: null };
-  loadQuiz();
+function startDrill(b) {
+  const filter = filterFromEl(b);
+  state.drill = { filter, label: b.dataset.label || 'Drill', done: 0, right: 0, streak: 0, recent: [], wasMastered: mastery(myMistakes(), drillProgress, filter).mastered };
+  state.drillDone = null;
+  setScreen('train');
+  loadDrill();
 }
 
-function loadQuiz() {
-  const q = state.quiz;
-  const item = q.items[q.i];
-  q.answer = null;
-  q.position = { fen: item.ply.fenBefore, analysis: analysisFor(item.ply.fenBefore), assessment: null, move: null };
+function loadDrill() {
+  const d = state.drill;
+  const mistakes = myMistakes();
+  const pool = mistakes.filter((m) => drillMatches(m, d.filter));
+  const skip = new Set(pool.length > 2 ? d.recent.slice(-1) : []);
+  const item = nextDrill(pool, drillProgress, null, skip);
+  if (!item) { stopDrill(); return; }
+  d.item = item;
+  d.answer = null;
+  d.judging = false;
+  d.position = { fen: item.fen, analysis: analysisFor(item.fen), assessment: null, move: null };
   board.clearSelection();
   render();
 }
 
-function answerQuiz(m) {
-  const q = state.quiz;
-  if (!q || q.answer) return;
-  const result = playMove(q.position, m);
-  q.answer = result.assessment;
-  q.position = { ...q.position, move: { from: m.from, to: m.to } };
+function stopDrill() {
+  const d = state.drill;
+  if (d && d.done) {
+    const m = mastery(myMistakes(), drillProgress, d.filter);
+    state.drillDone = { done: d.done, right: d.right, label: d.label, mastered: m.mastered && !d.wasMastered };
+  }
+  state.drill = null;
   render();
 }
 
+async function answerDrill(m) {
+  const d = state.drill;
+  if (!d || !d.item || d.answer || d.judging) return;
+  const item = d.item;
+  const chess = new Chess(item.fen);
+  const move = chess.move({ from: m.from, to: m.to, promotion: m.promotion || 'q' });
+  const afterFen = chess.fen();
+  const sign = item.color === 'w' ? 1 : -1;
+  let correct = item.accept.includes(move.san);
+  let loss = null;
+  d.position = { ...d.position, move: { from: m.from, to: m.to } };
+  if (!correct) {
+    d.judging = true;
+    render();
+    try {
+      if (!engine) engine = new Engine();
+      await engine.ready;
+      let before = item.evalBefore;
+      if (before === null) {
+        const r = await engine.search(item.fen, { movetime: 250 });
+        before = item.color === 'w' ? r.score : -r.score;
+      }
+      const after = chess.isCheckmate() ? sign * 100000 : (await engine.search(afterFen, { movetime: 300 }));
+      const afterWhite = typeof after === 'number' ? after : chess.turn() === 'w' ? after.score : -after.score;
+      const clampCp = (v) => Math.max(-2000, Math.min(2000, v));
+      loss = Math.max(0, clampCp(sign * before) - clampCp(sign * afterWhite));
+      correct = loss <= 60;
+    } catch {
+      const label = playMove({ fen: item.fen, analysis: analysisFor(item.fen) }, m).assessment.label;
+      correct = label === 'dominant' || label === 'good';
+    }
+  }
+  if (state.drill !== d) return;
+  recordAnswer(drillProgress, item, correct);
+  saveDrills();
+  d.done++;
+  d.recent.push(item.id);
+  if (correct) { d.right++; d.streak++; } else d.streak = 0;
+  let bestMove = null;
+  try { const bm = new Chess(item.fen).move(item.accept[0]); bestMove = { from: bm.from, to: bm.to }; } catch { /* no arrow */ }
+  d.answer = { correct, san: move.san, loss, best: item.accept[0], bestMove };
+  d.judging = false;
+  render();
+}
+
+function drillSession() {
+  const d = state.drill;
+  const item = d.item;
+  const m = mastery(myMistakes(), drillProgress, d.filter);
+  const progress = `<div class="meter"><span style="width:${Math.round(m.share * 100)}%"></span></div><p class="small muted">${esc(d.label)}: ${m.solid} of ${m.total} solid${m.mastered ? ' · <b class="trend-up">mastered</b>' : ''}</p>`;
+  if (d.judging) return `<article class="verdict"><p class="v-line"><span class="thinking">Stockfish is judging your move</span></p></article>${progress}`;
+  if (!d.answer) {
+    return `<article class="verdict"><p class="v-line">In the game you played <b class="mono">${esc(item.san)}</b> here. Find a better move.</p>${why(`<p>${esc(FUNDAMENTALS[item.fundamental].lesson)}</p>`, 'Hint')}</article>
+      ${progress}
+      <div class="action-bar"><button type="button" class="btn" data-action="skipDrill">Skip</button><button type="button" class="btn" data-action="stopDrill">Finish</button></div>`;
+  }
+  const a = d.answer;
+  const s = drillProgress.items[item.id];
+  const next = s && s.box >= 3 ? 'Solid. You won’t see this one for a while.' : a.correct ? 'It will come back in a few rounds to make sure.' : 'It will come back soon.';
+  return `<article class="verdict tone-${a.correct ? 'dominant' : 'mistake'}">
+      <div class="v-head"><span class="v-move mono">${esc(a.san)}</span>${pill(a.correct ? 'dominant' : 'mistake', a.correct ? 'Correct' : 'Not quite')}${a.loss !== null && !a.correct ? `<span class="v-meta">\u2212${(a.loss / 100).toFixed(1)}</span>` : ''}</div>
+      <p class="v-line">${a.correct ? (a.san === a.best ? 'That’s the best move.' : `Good enough. Stockfish’s top choice was <b class="mono">${esc(a.best)}</b>.`) : `Better was <b class="mono">${esc(a.best)}</b> (green arrow).`}</p>
+      <p class="small muted">${next}</p>
+    </article>
+    ${progress}
+    <div class="action-bar"><button type="button" class="btn primary" data-action="nextDrill">Next</button><button type="button" class="btn" data-action="playDrill">Play it out</button><button type="button" class="btn" data-action="stopDrill">Finish</button></div>`;
+}
+
 // ---------- play actions ----------
-async function startGame() {
+// opts: { fen, color, punish, practice } for practice games.
+async function startGame(opts = {}) {
+  if (opts instanceof HTMLElement) opts = {};
   if (state.check) state.check.cancelled = true;
   if (!engine) engine = new Engine();
   state.engineError = null;
-  const pick = state.setup.color;
+  const pick = opts.color || state.setup.color;
   const color = pick === 'r' ? (Math.random() < 0.5 ? 'w' : 'b') : pick;
   if (state.play) state.play.token++;
+  state.practice = opts.practice || null;
   state.play = new PlaySession(engine, {
     userColor: color,
     level: state.setup.level,
-    punish: state.setup.punish,
+    punish: opts.punish || state.setup.punish,
+    fen: opts.fen,
     onUpdate: () => { if (state.screen === 'play') render(); },
   });
+  if (state.screen !== 'play') setScreen('play');
   state.playIndex = null;
   state.hint = null;
   state.flipped = false;
@@ -788,8 +1086,9 @@ async function reviewPlayed() {
 }
 
 const ACTIONS = {
+  ...CAPTURE_ACTIONS,
   startGame,
-  newGame: () => { state.play = null; render(); },
+  newGame: () => { state.play = null; state.practice = null; render(); },
   hint: showHint,
   undo: () => { state.hint = null; state.playIndex = null; if (state.play.takeBack()) render(); },
   resign: () => state.play.resign(),
@@ -805,13 +1104,34 @@ const ACTIONS = {
     handleBoardMove({ from: alt.from, to: alt.to, promotion: alt.promotion });
   },
   jump: (b) => { state.variation = null; setScreen('review'); go(Number(b.dataset.jump)); },
-  startQuiz,
+  startDrill,
+  skipDrill: () => { state.drill.recent.push(state.drill.item.id); loadDrill(); },
+  nextDrill: () => loadDrill(),
+  stopDrill,
+  playDrill: () => {
+    const item = state.drill.item;
+    stopDrill();
+    startGame({ fen: item.fen, color: item.color, practice: { key: 'drill', title: 'Play out a drill position', focus: FUNDAMENTALS[item.fundamental].text, lesson: FUNDAMENTALS[item.fundamental].lesson } });
+  },
+  practise: (b) => {
+    const w = state.weakRows && state.weakRows[Number(b.dataset.weak)];
+    if (!w) return;
+    const p = w.practice;
+    const practice = { key: w.key, title: w.title, focus: p.focus || 'Play for the centre and quick development', lesson: w.lesson, tag: p.tag || null, habit: p.habit || null };
+    if (p.type === 'opening') startGame({ fen: p.fen, color: p.color, practice });
+    else if (p.type === 'positions' && p.positions.length) startGame({ fen: p.positions[0].fen, color: p.positions[0].color, punish: 'always', practice: { ...practice, positions: p.positions, index: 0 } });
+    else startGame({ punish: p.punish || undefined, practice });
+  },
+  nextPosition: () => {
+    const pr = state.practice;
+    const i = pr.index + 1;
+    startGame({ fen: pr.positions[i].fen, color: pr.positions[i].color, punish: 'always', practice: { ...pr, index: i } });
+  },
+  examples: (b) => { const w = state.weakRows && state.weakRows[Number(b.dataset.weak)]; if (w) { state.examples = w; openSheet('examples'); } },
   runCheck: () => runEngineCheck(state.checkTargets || []),
   cancelCheck: () => { if (state.check) state.check.cancelled = true; },
   openingGames: (b) => { const o = state.openingRows && state.openingRows[Number(b.dataset.opening)]; if (o) { state.gamesFilter = o; openSheet('games'); } },
-  skipQuiz: () => { const q = state.quiz; q.i = (q.i + 1) % q.items.length; loadQuiz(); },
-  nextQuiz: () => { const q = state.quiz; q.i = (q.i + 1) % q.items.length; loadQuiz(); },
-  stopQuiz: () => { state.quiz = null; render(); },
+
 };
 
 // ---------- navigation ----------
@@ -862,6 +1182,24 @@ function renderSheet() {
     if ($('sheet-import')) $('sheet-import').onclick = () => openSheet('import');
     if ($('sheet-all')) $('sheet-all').onclick = () => { state.gamesFilter = null; renderSheet(); };
     body.querySelectorAll('[data-game]').forEach((b) => { b.onclick = () => { selectGame(Number(b.dataset.game)); setScreen('review'); closeSheet(); }; });
+  } else if (sheetKind === 'examples') {
+    const w = state.examples;
+    $('sheet-title').textContent = 'Examples';
+    body.innerHTML = `<p class="muted small">${esc(w.title)}. Tap one to see it in Review.</p>
+      <ul class="game-list">${w.examples.map((e, i) => {
+        const p = e.game.game.plies[e.ply];
+        const h = e.game.headers;
+        return `<li><button type="button" data-ex="${i}"><b class="mono">${p ? `${moveNo(p)} ${esc(p.san)}` : 'Position'}</b><span>${esc(h.White || '?')} vs ${esc(h.Black || '?')}${h.Date && !h.Date.startsWith('?') ? ` \u00b7 ${esc(h.Date)}` : ''}</span></button></li>`;
+      }).join('')}</ul>`;
+    body.querySelectorAll('[data-ex]').forEach((b) => {
+      b.onclick = () => {
+        const e = w.examples[Number(b.dataset.ex)];
+        closeSheet();
+        selectGame(games.games.indexOf(e.game));
+        setScreen('review');
+        go(e.ply + 1);
+      };
+    });
   } else if (sheetKind === 'import') {
     $('sheet-title').textContent = 'Import games';
     const src = state.importSource || 'chesscom';

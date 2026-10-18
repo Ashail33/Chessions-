@@ -35,6 +35,17 @@ The app has four screens, switched from the tab bar: **Play** (Stockfish), **Rev
 - **Your patterns**: your games split by habit (castled by move 10, 3+ minors out by move 8, early queen, repeated piece moves, early edge pawns). You can compare your board dominance and score with and without each habit, so you learn which principles matter *for you*, from your own games.
 - **Trainer**: positions from your games where a much more dominating move existed. Find it on the board and see how your choice ranks.
 
+### What's holding you back, drills and practice
+
+- **Insights → What to fix** ranks the patterns costing you the most: habits (early queen, repeated piece moves, edge pawns, not castling, slow development), recurring mistakes (pieces left en prise, blocked bishops, knights on the rim, losing castling rights), your weakest opening, the phase where you blunder most and winning positions you didn't convert. Each comes with evidence from your games, a lesson, examples, a drill and a practice game.
+- **Problem map:** every costly move is classified by fundamental (tactics, development, king safety, piece activity, centre and space), by piece and by phase (opening, middlegame, endgame). Tap a cell to drill it.
+- **Drills (Train tab)** use positions from your own games where you went wrong. You find a better move and Stockfish judges it (within 0.6 of a pawn of the best counts). Spaced repetition: a miss comes back soon, a solve comes back later and later. A category is *mastered* when 80% of its positions have been solved three rounds running and your recent accuracy is 80%+.
+- **Practice games vs Stockfish** target a weakness: a focus coach flags each slip, you start from your weak opening, blunder practice punishes even inaccuracies, or you replay the winning positions you let slip. Results are logged, so each weakness shows your slips going down.
+
+### Record a game on a real board
+
+Play → *Record a game on a real board*. Put the phone above the board, tap the four corners (a8, h8, h1, a1) and play. Each square's colour and texture is sampled through a perspective transform. When the picture settles after a move, the legal move whose squares best match the changes is recorded (castling and en passant included). No piece recognition is needed because the game starts from the initial position. If it isn't sure it asks, a hand resting over the board is ignored, and you can always enter a move on the on-screen board. Finish to copy the PGN or analyse the game.
+
 ### Stats and engine checks
 
 - **Engine check:** in Review, *Check with Stockfish* runs the engine over every position of a game (about 80 ms each). Moves get the usual `?!` / `?` / `??` marks, the verdict shows the engine's grade, centipawn loss and best move next to the board-control grade, and the chart adds a dashed engine-evaluation line. Insights → All games can check your library ten games at a time.
@@ -101,6 +112,13 @@ src/insights.js          move assessment, principle tags, game reports, cross-ga
 src/board.js, chart.js   board with overlays and arrows; dominance chart
 src/import.js            PGN splitting/compaction, Lichess and Chess.com fetchers with date and time-control filters
 src/library.js           IndexedDB cache of imported games and their analysis
+src/collection.js        your game collection: import, worker-pool analysis, persistence
+src/stats.js             per-game facts and dashboard aggregates
+src/enginecheck.js       Stockfish check of every move in a game
+src/weaknesses.js        ranks what's holding you back
+src/drills.js            mistake categories and spaced-repetition drills
+src/vision.js            board homography, square sampling, move inference
+src/capture.js           camera session for recording over-the-board games
 src/worker.js            analyses games off the main thread
 src/engine.js            UCI wrapper around Stockfish in a Web Worker (WASM, with a pure-JS fallback)
 src/play.js              games against Stockfish: adaptive strength and punishing mistakes
