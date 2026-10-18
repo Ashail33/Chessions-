@@ -759,16 +759,22 @@ function capturePanel() {
   if (c.error) return `<article class="empty-card"><h2>Camera unavailable</h2><p>${esc(c.error)}</p><button type="button" class="btn wide" data-action="captureCancel">Back</button></article>`;
   if (c.step === 'camera') return '<article class="verdict"><p class="v-line"><span class="thinking">Starting the camera</span></p></article><div id="cam-slot"></div>';
   if (c.step === 'corners') {
-    return `<article class="verdict"><p class="v-line">Tap the outer corner of <b class="mono">${c.nextCorner}</b> (${c.corners.length + 1} of 4).</p>
-      <p class="small muted">Hold the phone steady above the board so all 64 squares are visible. Corners in order: a8, h8, h1, a1. a1 is the dark corner on White\u2019s left.</p>${c.status ? `<p class="small neg">${esc(c.status)}</p>` : ''}</article>
+    return `<article class="verdict"><p class="v-line">Set up the pieces in the starting position, then tap the four corners of the board (${c.corners.length} of 4).</p>
+      <p class="small muted">Any order is fine: the pieces show which side is White. Rest the phone on something so it stays still, with all 64 squares in view.</p>${c.status ? `<p class="small neg">${esc(c.status)}</p>` : ''}</article>
       <div id="cam-slot"></div>
       <div class="action-bar"><button type="button" class="btn" data-action="captureRedo" ${c.corners.length ? '' : 'disabled'}>Redo corners</button><button type="button" class="btn" data-action="captureCancel">Cancel</button></div>`;
   }
   if (c.step === 'confirm') {
-    return `<article class="verdict"><p class="v-line">Check the green grid sits on the squares, with a1 and h8 in the right corners. Then set up the pieces.</p>
+    const k = c.check || { ok: false, wrong: 0, separation: 0 };
+    const note = k.ok
+      ? '<p class="v-line"><b class="pos">All 32 pieces found.</b> White and black dots show what the camera reads on each square.</p>'
+      : k.wrong
+        ? `<p class="v-line"><b class="neg">${k.wrong} square${k.wrong === 1 ? ' reads' : 's read'} wrong.</b> Check the grid sits on the squares and every piece is on its starting square, then check again.</p>`
+        : '<p class="v-line"><b class="neg">The pieces are hard to tell from the squares.</b> More light, or a steeper angle from above, helps. You can still try.</p>';
+    return `<article class="verdict tone-${k.ok ? 'dominant' : 'passive'}">${note}
       <div class="field"><span class="label">You are playing</span>${chipGroup('captureMe', [{ value: 'w', text: 'White' }, { value: 'b', text: 'Black' }, { value: 'none', text: 'Just recording' }], state.captureMe)}</div></article>
       <div id="cam-slot"></div>
-      <div class="action-bar"><button type="button" class="btn primary" data-action="captureStart">Start recording</button><button type="button" class="btn" data-action="captureRedo">Redo corners</button></div>`;
+      <div class="action-bar"><button type="button" class="btn primary" data-action="captureStart">Start recording</button><button type="button" class="btn" data-action="captureRecheck">Check again</button><button type="button" class="btn" data-action="captureRedo">Redo corners</button></div>`;
   }
   const hist = c.chess.history({ verbose: true });
   const plies = hist.map((m, i) => ({ san: m.san, color: m.color, fullmove: Math.floor(i / 2) + 1 }));
@@ -803,6 +809,7 @@ const CAPTURE_ACTIONS = {
   },
   captureRedo: () => state.capture.redoCorners(),
   captureStart: () => state.capture.start(),
+  captureRecheck: () => state.capture.recheck(),
   capturePick: (b) => { const x = state.capture.candidates[Number(b.dataset.i)]; if (x) state.capture.play(x.move); },
   captureDismiss: () => state.capture.dismiss(),
   captureUndo: () => state.capture.undo(),

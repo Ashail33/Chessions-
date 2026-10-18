@@ -52,7 +52,7 @@ Chess comes down to skills and fundamentals, and those can be taught. The **Lear
 
 ### Record a game on a real board
 
-Play → *Record a game on a real board*. Put the phone above the board, tap the four corners (a8, h8, h1, a1) and play. Each square's colour and texture is sampled through a perspective transform. When the picture settles after a move, the legal move whose squares best match the changes is recorded (castling and en passant included). No piece recognition is needed because the game starts from the initial position. If it isn't sure it asks, a hand resting over the board is ignored, and you can always enter a move on the on-screen board. Finish to copy the PGN or analyse the game.
+Play → *Record a game on a real board*. Set up the pieces, rest the phone above the board and tap its four corners in any order; the pieces in their starting squares show which side is White. From that first frame the app learns what each square looks like empty, with a white piece and with a black piece, separately for light and dark squares. Every frame it then reads all 64 squares as empty, white or black (from the far side of each square, so a tall piece leaning over the one behind it doesn't count), and the legal move whose resulting board matches the reading is recorded once it holds for half a second (castling and en passant included). Exposure is corrected against squares known to be empty, and the colours are learnt again after every move, so changing light and a slightly moving phone are fine. A hand over the board is ignored. If it isn't sure it asks, and you can always enter a move on the on-screen board. Finish to copy the PGN or analyse the game.
 
 ### Stats and engine checks
 

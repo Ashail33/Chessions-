@@ -1,13 +1,12 @@
 // Camera side of over-the-board capture: opens the camera, lets you tap the
-// board corners, samples frames and reports settled changes to the app.
+// board corners, reads every square as empty, white or black, and reports
+// the moves it sees to the app.
 
 import { Chess } from '../vendor/chess.js';
-import { boardHomography, sampleSquares, rankCandidates, Tracker, squarePoint, project } from './vision.js';
+import { boardHomography, readFeatures, orientCorners, BoardReader, MoveWatcher, occupancy, squarePoint, project } from './vision.js';
 
 export const CORNER_ORDER = ['a8', 'h8', 'h1', 'a1'];
 const SAMPLE_WIDTH = 480;
-const CONFIDENT = 1;
-const MARGIN = 1.5;
 
 export class CaptureSession {
   constructor({ onChange = () => {} } = {}) {
@@ -18,7 +17,10 @@ export class CaptureSession {
     this.candidates = null; // asking which move was played
     this.status = '';
     this.error = null;
-    this.tracker = new Tracker();
+    this.reader = new BoardReader();
+    this.watcher = new MoveWatcher();
+    this.reading = null;
+    this.check = null; // result of reading the starting position
     this.el = document.createElement('div');
     this.el.className = 'cam';
     this.video = document.createElement('video');
@@ -53,22 +55,54 @@ export class CaptureSession {
     return CORNER_ORDER[this.corners.length];
   }
 
-  // Tap position in video pixels.
+  // Tap position in video pixels. Corners can be tapped in any order: the
+  // pieces in their starting squares show which corner is which.
   tap(e) {
     if (this.step !== 'corners') return;
     const box = this.overlay.getBoundingClientRect();
     const x = ((e.clientX - box.left) / box.width) * this.video.videoWidth;
     const y = ((e.clientY - box.top) / box.height) * this.video.videoHeight;
     this.corners.push([x, y]);
-    if (this.corners.length === 4) {
-      try {
-        this.H = boardHomography(this.corners);
-        this.step = 'confirm';
-      } catch {
-        this.corners = [];
-        this.status = 'Those corners didn’t form a board. Tap them again.';
-      }
+    this.status = '';
+    if (this.corners.length === 4) this.calibrate();
+    this.draw();
+    this.onChange();
+  }
+
+  // Orient the board and learn its colours from the starting position.
+  calibrate() {
+    const { img, scale } = this.frame();
+    try {
+      const { corners } = orientCorners(img, this.corners.map(([x, y]) => [x * scale, y * scale]));
+      this.corners = corners.map(([x, y]) => [x / scale, y / scale]);
+      this.H = boardHomography(this.corners);
+    } catch {
+      this.corners = [];
+      this.H = null;
+      this.status = 'Those corners didn’t form a board. Tap them again.';
+      return;
     }
+    const start = occupancy(this.chess);
+    const features = readFeatures(img, this.sampleH(scale));
+    this.reader = new BoardReader();
+    this.reader.train(features, start);
+    this.reading = this.reader.read(features, start);
+    const wrong = this.reading.labels.filter((l, i) => l !== start[i]).length;
+    const separation = this.reader.separation();
+    this.check = { wrong, separation, ok: wrong === 0 && separation >= 2 };
+    this.step = 'confirm';
+  }
+
+  // Re-learn the colours (lighting changes) on request, e.g. after fixing a piece.
+  recheck() {
+    if (!this.H) return;
+    const start = occupancy(this.chess);
+    const { img, scale } = this.frame();
+    const features = readFeatures(img, this.sampleH(scale));
+    this.reader.train(features, start);
+    this.reading = this.reader.read(features, start);
+    const wrong = this.reading.labels.filter((l, i) => l !== start[i]).length;
+    this.check = { wrong, separation: this.reader.separation(), ok: wrong === 0 && this.reader.separation() >= 2 };
     this.draw();
     this.onChange();
   }
@@ -76,34 +110,47 @@ export class CaptureSession {
   redoCorners() {
     this.corners = [];
     this.H = null;
+    this.check = null;
+    this.reading = null;
     this.step = 'corners';
     this.stopLoop();
     this.draw();
     this.onChange();
   }
 
-  // Sample the current frame at reduced size.
-  signature() {
+  // The current frame at reduced size.
+  frame() {
     const vw = this.video.videoWidth;
     const vh = this.video.videoHeight;
-    if (!vw) return null;
     const scale = SAMPLE_WIDTH / vw;
     const w = SAMPLE_WIDTH;
     const h = Math.round(vh * scale);
     if (this.sampler.width !== w) { this.sampler.width = w; this.sampler.height = h; }
     const ctx = this.sampler.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(this.video, 0, 0, w, h);
-    const img = ctx.getImageData(0, 0, w, h);
-    const H = boardHomography(this.corners.map(([x, y]) => [x * scale, y * scale]));
-    return sampleSquares(img, H);
+    return { img: ctx.getImageData(0, 0, w, h), scale };
+  }
+
+  sampleH(scale) {
+    return boardHomography(this.corners.map(([x, y]) => [x * scale, y * scale]));
+  }
+
+  features() {
+    if (!this.video.videoWidth || !this.H) return null;
+    const { img, scale } = this.frame();
+    return readFeatures(img, this.sampleH(scale));
+  }
+
+  // Learn from a frame whose position is known, keeping half of what was learnt before.
+  relearn(features = this.features()) {
+    if (features) this.reader.train(features, occupancy(this.chess), 0.5);
+    this.watcher.reset();
   }
 
   start() {
     this.step = 'recording';
     this.status = 'Watching the board';
-    this.tracker = new Tracker();
-    const sig = this.signature();
-    if (sig) this.tracker.reset(sig);
+    this.watcher = new MoveWatcher();
     this.stopLoop();
     this.timer = setInterval(() => this.tick(), 160);
     this.draw();
@@ -115,62 +162,48 @@ export class CaptureSession {
     this.timer = null;
   }
 
-  tick() {
-    const sig = this.signature();
-    if (!sig) return;
-    const r = this.tracker.feed(sig, performance.now());
-    if (r.state === 'moving') {
-      if (this.status !== 'Hand over the board') { this.status = 'Hand over the board'; this.onChange(); }
-      return;
-    }
-    if (r.state === 'still' && this.status === 'Hand over the board') { this.status = 'Watching the board'; this.onChange(); }
-    if (r.state !== 'changed' || this.candidates) return;
-    const moves = this.chess.moves({ verbose: true });
-    const ranked = rankCandidates(moves, r.diffs, this.tracker.noise);
-    const [top, second] = ranked;
-    this.lastSig = sig;
-    if (top && top.score > CONFIDENT && (!second || top.score - second.score > MARGIN)) {
-      this.unexplainedSince = null;
-      this.play(top.move);
-    } else if (!top || top.score <= 0) {
-      // Nothing legal explains the change: most likely a hand resting over
-      // the board. Keep looking, and only ask if it doesn't clear up.
-      const now = performance.now();
-      this.unexplainedSince ??= now;
-      this.tracker.pendingHandled = false;
-      if (now - this.unexplainedSince < 3000) return;
-      this.unexplainedSince = null;
-      this.candidates = [];
-      this.status = 'Couldn\u2019t read that move. Play it on the board above.';
-      this.onChange();
-    } else {
-      this.unexplainedSince = null;
-      this.candidates = ranked.filter((c) => c.score > -1).slice(0, 4);
-      this.status = this.candidates.length ? 'Which move was that?' : 'Couldn’t read that move. Enter it on the board.';
-      if (!this.candidates.length) this.candidates = [];
-      this.onChange();
-    }
+  setStatus(text) {
+    if (this.status !== text) { this.status = text; this.onChange(); }
   }
 
-  // Apply a move (detected, picked or entered by hand) and re-baseline.
-  play(m) {
+  tick() {
+    const features = this.features();
+    if (!features) return;
+    const occ = occupancy(this.chess);
+    this.reading = this.reader.read(features, occ);
+    this.draw();
+    if (this.candidates) return;
+    const r = this.watcher.feed(this.reading, occ, this.chess.moves({ verbose: true }), performance.now());
+    if (r.state === 'blocked') return this.setStatus('Hand over the board');
+    if (r.state === 'still') return this.setStatus('Watching the board');
+    if (r.state === 'waiting') return this.setStatus('Reading the move');
+    if (r.state === 'move') {
+      this.play(r.move, features);
+      return;
+    }
+    // Something changed but no legal move clearly explains it.
+    this.candidates = r.candidates.filter((c) => c.wrong <= 3);
+    this.status = this.candidates.length ? 'Which move was that?' : 'Couldn’t read that move. Play it on the board above.';
+    this.onChange();
+  }
+
+  // Apply a move (detected, picked or entered by hand) and learn the new position.
+  play(m, features) {
     const move = this.chess.move({ from: m.from, to: m.to, promotion: m.promotion || 'q' });
     this.candidates = null;
     this.status = `Played ${move.san}`;
-    const sig = this.lastSig || this.signature();
-    if (sig) this.tracker.accept(sig);
-    this.lastSig = null;
+    this.relearn(features);
     if (navigator.vibrate) try { navigator.vibrate(40); } catch { /* not supported */ }
     if (this.chess.isGameOver()) this.finish();
     this.onChange();
     return move;
   }
 
+  // Nothing was played: what the camera sees is the current position.
   dismiss() {
     this.candidates = null;
     this.status = 'Watching the board';
-    const sig = this.signature();
-    if (sig) this.tracker.accept(sig);
+    this.relearn();
     this.onChange();
   }
 
@@ -178,8 +211,7 @@ export class CaptureSession {
     if (!this.chess.history().length) return;
     this.chess.undo();
     this.candidates = null;
-    const sig = this.signature();
-    if (sig) this.tracker.accept(sig);
+    this.watcher.reset();
     this.status = 'Took back the last move. Put the pieces back on the board.';
     this.onChange();
   }
@@ -219,14 +251,16 @@ export class CaptureSession {
     const s = vw / 640;
     ctx.lineWidth = 3 * s;
     ctx.font = `${Math.round(22 * s)}px sans-serif`;
-    this.corners.forEach(([x, y], i) => {
-      ctx.fillStyle = '#19995e';
-      ctx.beginPath();
-      ctx.arc(x, y, 9 * s, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(CORNER_ORDER[i], x + 12 * s, y - 10 * s);
-    });
+    if (!this.H) {
+      this.corners.forEach(([x, y], i) => {
+        ctx.fillStyle = '#19995e';
+        ctx.beginPath();
+        ctx.arc(x, y, 9 * s, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(String(i + 1), x + 12 * s, y - 10 * s);
+      });
+    }
     if (this.H) {
       ctx.strokeStyle = 'rgba(25, 153, 94, 0.9)';
       for (let k = 0; k <= 8; k++) {
@@ -244,8 +278,28 @@ export class CaptureSession {
       // Label two squares so a rotated grid is easy to spot.
       ctx.fillStyle = '#ffffff';
       for (const [sq, name] of [[0, 'a1'], [63, 'h8']]) {
-        const [x, y] = squarePoint(this.H, sq, 0.3, 0.6);
+        const [x, y] = squarePoint(this.H, sq, 0.08, 0.92);
         ctx.fillText(name, x, y);
+      }
+      // What the camera reads on each square.
+      if (this.reading) {
+        for (let sq = 0; sq < 64; sq++) {
+          const [x, y] = squarePoint(this.H, sq);
+          const label = this.reading.labels[sq];
+          ctx.beginPath();
+          ctx.arc(x, y, 6 * s, 0, Math.PI * 2);
+          if (this.reading.unknown[sq]) {
+            ctx.strokeStyle = '#ff5c69';
+            ctx.stroke();
+          } else if (label !== 'e') {
+            ctx.fillStyle = label === 'w' ? '#ffffff' : '#111111';
+            ctx.fill();
+            ctx.strokeStyle = label === 'w' ? '#111111' : '#ffffff';
+            ctx.lineWidth = 1.5 * s;
+            ctx.stroke();
+            ctx.lineWidth = 3 * s;
+          }
+        }
       }
     }
   }
