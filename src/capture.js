@@ -8,9 +8,32 @@ import { boardHomography, readFeatures, orientCorners, BoardReader, MoveWatcher,
 export const CORNER_ORDER = ['a8', 'h8', 'h1', 'a1'];
 const SAMPLE_WIDTH = 480;
 
+// Spoken form of a move, so you know it was recorded without looking.
+const PIECE_WORDS = { N: 'knight', B: 'bishop', R: 'rook', Q: 'queen', K: 'king' };
+export function spokenMove(san) {
+  if (san.startsWith('O-O-O')) return 'castles long' + (san.includes('#') ? ', checkmate' : san.includes('+') ? ', check' : '');
+  if (san.startsWith('O-O')) return 'castles' + (san.includes('#') ? ', checkmate' : san.includes('+') ? ', check' : '');
+  const m = san.match(/^([NBRQK])?([a-h])?([1-8])?(x)?([a-h][1-8])(=([NBRQ]))?([+#])?$/);
+  if (!m) return san;
+  const parts = [];
+  if (m[1]) parts.push(PIECE_WORDS[m[1]]);
+  else if (m[4]) parts.push(m[2]);
+  if (m[1] && (m[2] || m[3])) parts.push(`${m[2] || ''}${m[3] || ''}`);
+  if (m[4]) parts.push('takes');
+  parts.push(m[5]);
+  if (m[7]) parts.push(`promotes to ${PIECE_WORDS[m[7]]}`);
+  if (m[8] === '+') parts.push('check');
+  if (m[8] === '#') parts.push('checkmate');
+  return parts.join(' ');
+}
+
 export class CaptureSession {
-  constructor({ onChange = () => {} } = {}) {
+  // memory: { get(key, fallback), set(key, value) } for settings kept between games.
+  constructor({ onChange = () => {}, memory = null } = {}) {
     this.onChange = onChange;
+    this.memory = memory;
+    this.speak = memory ? memory.get('captureSpeak', true) : true;
+    this.showCamera = true;
     this.chess = new Chess();
     this.step = 'camera'; // camera -> corners -> confirm -> recording -> done
     this.corners = [];
@@ -55,6 +78,21 @@ export class CaptureSession {
     return CORNER_ORDER[this.corners.length];
   }
 
+  // Corners from the last game, for a phone left in the same spot.
+  get lastCorners() {
+    const c = this.memory && this.memory.get('captureCorners', null);
+    return Array.isArray(c) && c.length === 4 ? c : null;
+  }
+
+  useLastCorners() {
+    const c = this.lastCorners;
+    if (!c || this.step !== 'corners') return;
+    this.corners = c.map(([x, y]) => [x * this.video.videoWidth, y * this.video.videoHeight]);
+    this.calibrate();
+    this.draw();
+    this.onChange();
+  }
+
   // Tap position in video pixels. Corners can be tapped in any order: the
   // pieces in their starting squares show which corner is which.
   tap(e) {
@@ -87,10 +125,22 @@ export class CaptureSession {
     this.reader = new BoardReader();
     this.reader.train(features, start);
     this.reading = this.reader.read(features, start);
-    const wrong = this.reading.labels.filter((l, i) => l !== start[i]).length;
-    const separation = this.reader.separation();
-    this.check = { wrong, separation, ok: wrong === 0 && separation >= 2 };
+    this.updateCheck();
+    if (this.memory) this.memory.set('captureCorners', this.corners.map(([x, y]) => [x / this.video.videoWidth, y / this.video.videoHeight]));
     this.step = 'confirm';
+    // Keep reading while you check the setup, so fixes show straight away.
+    this.stopLoop();
+    this.timer = setInterval(() => this.tick(), 200);
+  }
+
+  updateCheck() {
+    const start = occupancy(this.chess);
+    const wrongSquares = [];
+    this.reading.labels.forEach((l, i) => { if (l !== start[i] || this.reading.unknown[i]) wrongSquares.push(i); });
+    const separation = this.reader.separation();
+    const before = this.check && this.check.wrong;
+    this.check = { wrong: wrongSquares.length, wrongSquares, separation, ok: wrongSquares.length === 0 && separation >= 2 };
+    return before !== this.check.wrong;
   }
 
   // Re-learn the colours (lighting changes) on request, e.g. after fixing a piece.
@@ -101,8 +151,7 @@ export class CaptureSession {
     const features = readFeatures(img, this.sampleH(scale));
     this.reader.train(features, start);
     this.reading = this.reader.read(features, start);
-    const wrong = this.reading.labels.filter((l, i) => l !== start[i]).length;
-    this.check = { wrong, separation: this.reader.separation(), ok: wrong === 0 && this.reader.separation() >= 2 };
+    this.updateCheck();
     this.draw();
     this.onChange();
   }
@@ -153,7 +202,41 @@ export class CaptureSession {
     this.watcher = new MoveWatcher();
     this.stopLoop();
     this.timer = setInterval(() => this.tick(), 160);
+    this.keepAwake();
+    this.say('Recording');
     this.draw();
+    this.onChange();
+  }
+
+  // Stop the screen sleeping mid-game.
+  async keepAwake() {
+    try {
+      if (navigator.wakeLock && !this.wakeLock) {
+        this.wakeLock = await navigator.wakeLock.request('screen');
+        this.wakeLock.addEventListener('release', () => { this.wakeLock = null; });
+      }
+    } catch { /* not supported or refused */ }
+  }
+
+  say(text) {
+    if (!this.speak || typeof speechSynthesis === 'undefined') return;
+    try {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.05;
+      speechSynthesis.speak(u);
+    } catch { /* no speech */ }
+  }
+
+  setSpeak(on) {
+    this.speak = on;
+    if (this.memory) this.memory.set('captureSpeak', on);
+    if (!on && typeof speechSynthesis !== 'undefined') try { speechSynthesis.cancel(); } catch { /* no speech */ }
+    this.onChange();
+  }
+
+  toggleCamera() {
+    this.showCamera = !this.showCamera;
     this.onChange();
   }
 
@@ -171,6 +254,14 @@ export class CaptureSession {
     if (!features) return;
     const occ = occupancy(this.chess);
     this.reading = this.reader.read(features, occ);
+    if (this.step === 'confirm') {
+      const changed = this.updateCheck();
+      this.draw();
+      if (changed) this.onChange();
+      return;
+    }
+    // A wake lock is dropped when the app is hidden; take it again.
+    if (!this.wakeLock && document.visibilityState === 'visible') this.keepAwake();
     this.draw();
     if (this.candidates) return;
     const r = this.watcher.feed(this.reading, occ, this.chess.moves({ verbose: true }), performance.now());
@@ -184,6 +275,8 @@ export class CaptureSession {
     // Something changed but no legal move clearly explains it.
     this.candidates = r.candidates.filter((c) => c.wrong <= 3);
     this.status = this.candidates.length ? 'Which move was that?' : 'Couldn’t read that move. Play it on the board above.';
+    if (navigator.vibrate) try { navigator.vibrate([60, 80, 60]); } catch { /* not supported */ }
+    this.say(this.candidates.length ? 'Which move was that?' : 'Couldn’t read that move');
     this.onChange();
   }
 
@@ -191,8 +284,11 @@ export class CaptureSession {
   play(m, features) {
     const move = this.chess.move({ from: m.from, to: m.to, promotion: m.promotion || 'q' });
     this.candidates = null;
-    this.status = `Played ${move.san}`;
+    // The app shows the last move played while it watches for the next one.
+    this.status = 'Watching the board';
+    this.lastPlayed = move;
     this.relearn(features);
+    this.say(spokenMove(move.san));
     if (navigator.vibrate) try { navigator.vibrate(40); } catch { /* not supported */ }
     if (this.chess.isGameOver()) this.finish();
     this.onChange();
@@ -211,6 +307,7 @@ export class CaptureSession {
     if (!this.chess.history().length) return;
     this.chess.undo();
     this.candidates = null;
+    this.lastPlayed = null;
     this.watcher.reset();
     this.status = 'Took back the last move. Put the pieces back on the board.';
     this.onChange();
@@ -225,6 +322,9 @@ export class CaptureSession {
 
   close() {
     this.stopLoop();
+    if (this.wakeLock) this.wakeLock.release().catch(() => {});
+    this.wakeLock = null;
+    if (typeof speechSynthesis !== 'undefined') try { speechSynthesis.cancel(); } catch { /* no speech */ }
     if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
     this.stream = null;
   }
@@ -286,12 +386,17 @@ export class CaptureSession {
         for (let sq = 0; sq < 64; sq++) {
           const [x, y] = squarePoint(this.H, sq);
           const label = this.reading.labels[sq];
-          ctx.beginPath();
-          ctx.arc(x, y, 6 * s, 0, Math.PI * 2);
-          if (this.reading.unknown[sq]) {
+          const wrong = this.step === 'confirm' && this.check && this.check.wrongSquares.includes(sq);
+          if (this.reading.unknown[sq] || wrong) {
             ctx.strokeStyle = '#ff5c69';
+            ctx.lineWidth = 3 * s;
+            ctx.beginPath();
+            ctx.arc(x, y, 11 * s, 0, Math.PI * 2);
             ctx.stroke();
-          } else if (label !== 'e') {
+          }
+          if (!this.reading.unknown[sq] && label !== 'e') {
+            ctx.beginPath();
+            ctx.arc(x, y, 6 * s, 0, Math.PI * 2);
             ctx.fillStyle = label === 'w' ? '#ffffff' : '#111111';
             ctx.fill();
             ctx.strokeStyle = label === 'w' ? '#111111' : '#ffffff';
