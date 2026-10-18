@@ -7,7 +7,7 @@ import { Board } from './board.js';
 import { renderChart, miniChart } from './chart.js';
 import { gameFacts, aggregate, filterFacts, PIECES } from './stats.js';
 import { findWeaknesses, isSlip, MIN_GAMES } from './weaknesses.js';
-import { collectMistakes, problemMap, newProgress, nextDrill, recordAnswer, mastery, matches as drillMatches, FUNDAMENTALS, PHASES } from './drills.js';
+import { collectMistakes, problemMap, newProgress, nextDrill, recordAnswer, mastery, matches as drillMatches, FUNDAMENTALS, PHASES, MASTERED_BOX } from './drills.js';
 import { checkGame, NAG } from './enginecheck.js';
 import { engineGrade } from './play.js';
 import { SAMPLES } from './samples.js';
@@ -283,6 +283,8 @@ function renderStage() {
     arrows,
     legal,
   });
+
+  renderStamp();
 
   const share = dominanceShare(v.analysis.dominance);
   $('share-w').style.width = share.toFixed(1) + '%';
@@ -1197,7 +1199,8 @@ function drillsHome() {
   }
   const all = mastery(mistakes, drillProgress);
   const fund = Object.keys(FUNDAMENTALS).map((k) => ({ k, m: mastery(mistakes, drillProgress, { fundamental: k }) })).filter((x) => x.m.total);
-  const done = state.drillDone ? `<article class="result win"><h2>${state.drillDone.mastered ? 'Mastered!' : 'Session done'}</h2><p>${state.drillDone.right} of ${state.drillDone.done} solved${state.drillDone.mastered ? `. You’ve mastered ${esc(state.drillDone.label)}.` : '.'}</p></article>` : '';
+  const dd = state.drillDone;
+  const done = dd ? `<article class="drill-result ${dd.mastered || dd.right * 2 >= dd.done ? 'ok' : 'bad'}${dd.mastered ? ' big' : ''}"><div class="dr-head"><span class="dr-icon" aria-hidden="true">${dd.mastered ? '\u2605' : dd.right * 2 >= dd.done ? '\u2713' : '\u21bb'}</span><div><h2>${dd.mastered ? `${esc(dd.label)} mastered!` : 'Session done'}</h2><p><b>${dd.right} of ${dd.done}</b> solved${dd.mastered ? '. This pattern is under control.' : dd.right * 2 >= dd.done ? '. Nice work.' : '. These will come back until they stick.'}</p></div></div></article>` : '';
   return `${done}<article class="setup"><h2>Drills</h2>
       <p>Positions from your games where you went wrong. Find a better move; Stockfish judges it. Missed positions come back soon, solved ones later, until you get them right three rounds running.</p>
       <div class="meter"><span style="width:${Math.round(all.share * 100)}%"></span></div>
@@ -1280,6 +1283,8 @@ async function answerDrill(m) {
     }
   }
   if (state.drill !== d) return;
+  const boxBefore = (drillProgress.items[item.id] || { box: 0 }).box;
+  const masteredBefore = mastery(myMistakes(), drillProgress, d.filter).mastered;
   recordAnswer(drillProgress, item, correct);
   saveDrills();
   d.done++;
@@ -1287,9 +1292,30 @@ async function answerDrill(m) {
   if (correct) { d.right++; d.streak++; } else d.streak = 0;
   let bestMove = null;
   try { const bm = new Chess(item.fen).move(item.accept[0]); bestMove = { from: bm.from, to: bm.to }; } catch { /* no arrow */ }
-  d.answer = { correct, san: move.san, loss, best: item.accept[0], bestMove };
+  const passed = correct && boxBefore < MASTERED_BOX && drillProgress.items[item.id].box >= MASTERED_BOX;
+  const categoryMastered = correct && !masteredBefore && mastery(myMistakes(), drillProgress, d.filter).mastered;
+  d.answer = { correct, san: move.san, loss, best: item.accept[0], bestMove, passed, categoryMastered };
+  try { navigator.vibrate?.(correct ? (passed || categoryMastered ? [40, 60, 40, 60, 120] : 40) : [80, 60, 80]); } catch { /* no vibration */ }
   d.judging = false;
   render();
+}
+
+// Big result stamp over the board after a drill answer. Keyed by answer so
+// re-renders don't replay the animation.
+function renderStamp() {
+  const el = $('stamp');
+  const d = state.screen === 'train' && state.drill;
+  const a = d && d.answer;
+  if (!a) { el.hidden = true; el.dataset.key = ''; return; }
+  const key = `${d.done}`;
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  const tick = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 16.2 5.3 12l-1.4 1.4 5.6 5.6 11-11-1.4-1.4z"/></svg>';
+  const cross = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5 5 6.4 10.6 12 5 17.6 6.4 19l5.6-5.6 5.6 5.6 1.4-1.4-5.6-5.6L19 6.4 17.6 5 12 10.6z"/></svg>';
+  const title = a.categoryMastered ? 'Mastered!' : a.passed ? 'Passed!' : a.correct ? 'Solved' : 'Not quite';
+  el.className = `stamp ${a.correct ? 'ok' : 'bad'}${a.passed || a.categoryMastered ? ' big' : ''}`;
+  el.innerHTML = `<div class="stamp-card">${a.correct ? tick : cross}<b>${title}</b></div>`;
+  el.hidden = false;
 }
 
 function drillSession() {
@@ -1305,8 +1331,13 @@ function drillSession() {
   }
   const a = d.answer;
   const s = drillProgress.items[item.id];
-  const next = s && s.box >= 3 ? 'Solid. You won’t see this one for a while.' : a.correct ? 'It will come back in a few rounds to make sure.' : 'It will come back soon.';
-  return `<article class="verdict tone-${a.correct ? 'dominant' : 'mistake'}">
+  const next = s && s.box >= MASTERED_BOX ? 'Solid. You won’t see this one for a while.' : a.correct ? `Solve it ${MASTERED_BOX - s.box} more time${MASTERED_BOX - s.box === 1 ? '' : 's'} to pass it.` : 'It will come back after a couple of others.';
+  const title = a.categoryMastered ? `${esc(d.label)} mastered!` : a.passed ? 'Position passed!' : a.correct ? 'Solved' : 'Not quite';
+  const sub = a.categoryMastered ? 'You’ve solved these positions reliably. This pattern is under control.' : a.passed ? 'You’ve solved this position three times running.' : a.correct && d.streak > 1 ? `${d.streak} in a row` : '';
+  return `<article class="drill-result ${a.correct ? 'ok' : 'bad'}${a.passed || a.categoryMastered ? ' big' : ''}">
+      <div class="dr-head"><span class="dr-icon" aria-hidden="true">${a.correct ? '\u2713' : '\u2717'}</span><div><h2>${title}</h2>${sub ? `<p>${sub}</p>` : ''}</div></div>
+    </article>
+    <article class="verdict tone-${a.correct ? 'dominant' : 'mistake'}">
       <div class="v-head"><span class="v-move mono">${esc(a.san)}</span>${pill(a.correct ? 'dominant' : 'mistake', a.correct ? 'Correct' : 'Not quite')}${a.loss !== null && !a.correct ? `<span class="v-meta">\u2212${(a.loss / 100).toFixed(1)}</span>` : ''}</div>
       <p class="v-line">${a.correct ? (a.san === a.best ? 'That’s the best move.' : `Good enough. Stockfish’s top choice was <b class="mono">${esc(a.best)}</b>.`) : `Better was <b class="mono">${esc(a.best)}</b> (green arrow).`}</p>
       <p class="small muted">${next}</p>
