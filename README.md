@@ -46,6 +46,21 @@ Set your username at the top so each game is analysed from your side. Games and 
 
 To host it, any static host works (GitHub Pages: Settings → Pages → deploy from the default branch, root folder).
 
+## Android app
+
+The same app is packaged for Android with [Capacitor](https://capacitorjs.com), so it runs fully on your phone: no server and no `npm start`. Stockfish, analysis and your saved games all live on the device, and Chess.com and Lichess imports work directly.
+
+**Install:** copy `Chessions.apk` to your phone and open it. Android will ask you to allow installs from that source (Settings → Apps → Special access → Install unknown apps). It's a debug build signed with a development key, so Play Protect may warn that it's from an unknown developer.
+
+**Get a fresh APK:** every push that changes the app runs the `android` GitHub Action. The APK is attached to the run as the `chessions-apk` artifact. You can also start it by hand from the Actions tab.
+
+**Build it yourself** (needs JDK 21 and the Android SDK, with `ANDROID_HOME` set):
+
+```sh
+npm install
+npm run android:apk    # → android/app/build/outputs/apk/debug/app-debug.apk
+```
+
 ## Tests
 
 ```sh
