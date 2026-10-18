@@ -10,6 +10,8 @@ on:
       - 'android/**'
       - 'capacitor.config.json'
       - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/android.yml'
 jobs:
   apk:
     runs-on: ubuntu-latest
