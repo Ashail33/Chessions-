@@ -1,7 +1,8 @@
 import { Chess } from '../vendor/chess.js';
 import { analyzePosition, rankMoves, dominanceShare, other, LABELS } from './analysis.js';
-import { analyzeGame, assessMove, gameReport, habitPatterns, detectUserColor, describeDeltas, TAGS } from './insights.js';
-import { splitPgn, fetchLichess, fetchChessCom } from './import.js';
+import { analyzeGame, slimGame, ANALYSIS_VERSION, assessMove, gameReport, habitPatterns, detectUserColor, describeDeltas, TAGS } from './insights.js';
+import { splitPgn, compactPgn, gameKey, fetchLichess, fetchChessCom, TIME_CLASSES } from './import.js';
+import { library } from './library.js';
 import { Board } from './board.js';
 import { renderChart } from './chart.js';
 import { SAMPLES } from './samples.js';
@@ -35,33 +36,65 @@ const state = {
 let engine = null;
 let nextId = 1;
 
-// ---------- analysis worker ----------
-let worker = null;
+// ---------- analysis workers ----------
+// A small pool so large libraries analyse in parallel.
+const POOL_SIZE = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
+const pool = [];
 const pending = new Map();
-try {
-  worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
-  worker.onmessage = (e) => {
-    const p = pending.get(e.data.id);
-    if (!p) return;
-    pending.delete(e.data.id);
-    e.data.error ? p.reject(new Error(e.data.error)) : p.resolve(e.data.game);
-  };
-  worker.onerror = () => {
-    worker = null;
-    for (const p of pending.values()) p.reject(new Error('Worker failed'));
-    pending.clear();
-  };
-} catch { worker = null; }
+for (let i = 0; i < POOL_SIZE; i++) {
+  try {
+    const w = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+    const slot = { w, busy: 0, dead: false };
+    w.onmessage = (e) => {
+      const p = pending.get(e.data.id);
+      if (!p) return;
+      pending.delete(e.data.id);
+      slot.busy--;
+      e.data.error ? p.reject(new Error(e.data.error)) : p.resolve(e.data.game);
+    };
+    w.onerror = () => {
+      slot.dead = true;
+      for (const [id, p] of pending) {
+        if (p.slot !== slot) continue;
+        pending.delete(id);
+        p.reject(new Error('Worker failed'));
+      }
+    };
+    pool.push(slot);
+  } catch {
+    break;
+  }
+}
+const liveWorkers = () => pool.filter((s) => !s.dead);
+const analyseHere = (pgn) => new Promise((resolve, reject) => setTimeout(() => {
+  try { resolve(slimGame(analyzeGame(pgn, { window: WINDOW }))); } catch (err) { reject(err); }
+}, 0));
 
 function runAnalysis(id, pgn) {
-  if (!worker) return new Promise((res) => setTimeout(() => res(analyzeGame(pgn, { window: WINDOW })), 0));
+  const live = liveWorkers();
+  if (!live.length) return analyseHere(pgn);
+  const slot = live.reduce((a, b) => (b.busy < a.busy ? b : a));
+  slot.busy++;
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    worker.postMessage({ id, pgn, window: WINDOW });
+    pending.set(id, { resolve, reject, slot });
+    slot.w.postMessage({ id, pgn, window: WINDOW });
   }).catch((err) => {
-    if (/Worker|module/i.test(err.message)) return analyzeGame(pgn, { window: WINDOW });
+    if (/Worker|module/i.test(err.message)) return analyseHere(pgn);
     throw err;
   });
+}
+
+// Stored analyses keep only summary numbers per position; the full board
+// analysis is recomputed when a position is shown.
+const analysisCache = new Map();
+function analysisFor(fen) {
+  let a = analysisCache.get(fen);
+  if (!a) {
+    a = analyzePosition(new Chess(fen));
+    analysisCache.set(fen, a);
+    if (analysisCache.size > 300) analysisCache.delete(analysisCache.keys().next().value);
+  }
+  return a;
 }
 
 // ---------- games ----------
@@ -71,35 +104,104 @@ function readHeaders(pgn) {
   return h;
 }
 
+function makeGame(pgn, { userColor = null, sample = false } = {}) {
+  const compact = compactPgn(pgn);
+  const headers = readHeaders(compact);
+  const detected = detectUserColor(headers, $('username').value);
+  return {
+    id: nextId++, key: gameKey(headers, compact), pgn: compact, headers, added: 0,
+    userColor: userColor || detected || 'w', colorKnown: !!(userColor || detected), sample,
+    game: null, report: null, error: null,
+  };
+}
+
+const record = (g) => ({ key: g.key, pgn: g.pgn, userColor: g.userColor, colorKnown: g.colorKnown, added: g.added, game: g.game, version: ANALYSIS_VERSION });
+
+function throttle(fn, ms) {
+  let timer = null;
+  return () => {
+    if (timer) return;
+    timer = setTimeout(() => { timer = null; fn(); }, ms);
+  };
+}
+
+// Add games (skipping ones already in the library) and analyse them.
 async function addGames(pgns, { userColor = null, persist = true, sample = false } = {}) {
-  const username = $('username').value;
-  const added = pgns.map((pgn) => {
-    const headers = readHeaders(pgn);
-    return { id: nextId++, pgn, headers, userColor: userColor || detectUserColor(headers, username) || 'w', colorKnown: !!(userColor || detectUserColor(headers, username)), sample, game: null, error: null };
+  // The example games make way once you bring your own.
+  if (!sample && state.games.some((g) => g.sample)) {
+    const cur = currentGame();
+    state.games = state.games.filter((g) => !g.sample);
+    state.current = cur && !cur.sample ? state.games.indexOf(cur) : state.games.length ? 0 : -1;
+    state.index = cur && cur.sample ? 0 : state.index;
+  }
+  const known = new Set(state.games.map((g) => g.key));
+  const base = Date.now() * 1000;
+  const added = [];
+  pgns.forEach((pgn, i) => {
+    const g = makeGame(pgn, { userColor, sample });
+    if (known.has(g.key)) return;
+    known.add(g.key);
+    g.added = base + i;
+    added.push(g);
   });
   state.games.push(...added);
-  if (persist) saveGames();
   if (state.current < 0 && added.length) state.current = state.games.indexOf(added[0]);
   renderGameList();
   render();
-  let done = 0;
-  for (const g of added) {
-    setStatus(`Analysing ${++done} of ${added.length}…`);
-    try {
-      g.game = await runAnalysis(g.id, g.pgn);
-      g.report = gameReport(g.game, g.userColor, { openingMoves: OPENING_MOVES });
-    } catch (err) {
-      g.error = err.message;
-    }
-    renderGameList();
-    if (state.games[state.current] === g) render();
-  }
-  setStatus(added.length ? `Analysed ${added.length} game${added.length > 1 ? 's' : ''}.` : '');
-  renderLower();
+  const result = await analyseGames(added, { persist });
+  return { ...result, added, skipped: pgns.length - added.length };
 }
 
-function saveGames() {
-  store.set('games', state.games.filter((g) => !g.sample).slice(-50).map((g) => ({ pgn: g.pgn, userColor: g.colorKnown ? g.userColor : null })));
+let job = null; // the import or analysis currently running
+let storageFull = false;
+
+async function analyseGames(list, { persist = true } = {}) {
+  const me = { cancelled: false };
+  job = me;
+  $('import-cancel').hidden = false;
+  let next = 0;
+  let done = 0;
+  let failed = 0;
+  const batch = [];
+  const flush = async () => {
+    if (!persist || !batch.length) return;
+    if (!(await library.put(batch.splice(0).map(record)))) storageFull = true;
+  };
+  const refresh = throttle(() => { renderGameList(); renderLower(); }, 700);
+  const run = async () => {
+    while (next < list.length && !me.cancelled) {
+      const g = list[next++];
+      try {
+        g.game = await runAnalysis(g.id, g.pgn);
+        g.report = gameReport(g.game, g.userColor, { openingMoves: OPENING_MOVES });
+        if (!g.sample) batch.push(g);
+      } catch (err) {
+        g.error = err.message;
+        failed++;
+      }
+      done++;
+      if (list.length > 1) setStatus(`Analysed ${done} of ${list.length} games…`);
+      if (batch.length >= 25) await flush();
+      if (currentGame() === g) render();
+      refresh();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, liveWorkers().length) }, run));
+  await flush();
+  if (me.cancelled) {
+    const cur = currentGame();
+    const drop = new Set(list.filter((g) => !g.game && !g.error));
+    state.games = state.games.filter((g) => !drop.has(g));
+    state.current = state.games.length ? Math.max(0, state.games.indexOf(cur)) : -1;
+  }
+  if (job === me) {
+    job = null;
+    $('import-cancel').hidden = true;
+  }
+  renderGameList();
+  render();
+  renderLower();
+  return { analysed: done - failed, failed, cancelled: me.cancelled };
 }
 
 function setStatus(text, error = false) {
@@ -125,7 +227,7 @@ function view() {
   }
   const pos = g.game.positions[state.index];
   const ply = state.index > 0 ? g.game.plies[state.index - 1] : null;
-  return { fen: pos.fen, analysis: pos.analysis, assessment: ply, move: ply };
+  return { fen: pos.fen, analysis: analysisFor(pos.fen), assessment: ply, move: ply };
 }
 
 const userColor = () => (state.mode === 'play' && state.play ? state.play.userColor : currentGame() ? currentGame().userColor : 'w');
@@ -442,11 +544,12 @@ function renderGraph() {
 
 function renderGameList() {
   const el = $('game-list');
+  $('games-count').textContent = state.games.length ? `Games (${state.games.length})` : 'Games';
   if (!state.games.length) { el.innerHTML = '<li class="empty">Paste a PGN or import your games to start.</li>'; return; }
   el.innerHTML = state.games.map((g, i) => {
     const h = g.headers;
     const r = g.report;
-    const status = g.error ? `<span class="pill mistake">Error</span>` : !g.game ? '<span>Analysing…</span>' : `<span>As ${g.userColor === 'w' ? 'White' : 'Black'}</span><span>${h.Result || ''}</span>${r ? `<span>Avg gap ${r.avgGap.toFixed(1)}</span>` : ''}`;
+    const status = g.error ? `<span class="pill mistake">Error</span>` : !g.game ? '<span>Analysing…</span>' : `${h.Date && !h.Date.startsWith('?') ? `<span>${esc(h.Date.replace(/\.\?\?/g, ''))}</span>` : ''}<span>As ${g.userColor === 'w' ? 'White' : 'Black'}</span><span>${h.Result || ''}</span>${r ? `<span>Avg gap ${r.avgGap.toFixed(1)}</span>` : ''}`;
     return `<li><button type="button" data-game="${i}" aria-current="${i === state.current}"><span class="players">${esc(h.White || '?')} – ${esc(h.Black || '?')}</span><span class="meta">${status}</span></button></li>`;
   }).join('');
   el.querySelectorAll('[data-game]').forEach((b) => {
@@ -705,9 +808,8 @@ function showHint() {
 function savePlayedGame() {
   const s = state.play;
   if (!s || s.positions.length < 2) return;
-  const first = state.games.length;
-  addGames([s.pgn()], { userColor: s.userColor }).then(() => {
-    selectGame(first);
+  addGames([s.pgn()], { userColor: s.userColor }).then((r) => {
+    if (r.added[0]) selectGame(state.games.indexOf(r.added[0]));
     document.querySelector('#lower-tabs [data-tab="report"]').click();
   });
 }
@@ -820,18 +922,34 @@ let importSource = 'pgn';
 bindTabs($('import-tabs'), (tab) => {
   importSource = tab;
   document.querySelectorAll('#import-form [data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== tab; });
+  $('fetch-opts').hidden = tab === 'pgn';
   $('import-btn').textContent = tab === 'pgn' ? 'Analyse' : 'Import & analyse';
 });
 bindTabs($('lower-tabs'), (tab) => {
   document.querySelectorAll('.lower > [data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== tab; });
 });
 
+let fetchAbort = null;
+
+function fetchOptions() {
+  const all = document.querySelector('input[name="scope"]:checked').value === 'all';
+  const timeClasses = [...document.querySelectorAll('input[name="tc"]:checked')].map((i) => i.value);
+  return {
+    max: all ? Infinity : Math.max(1, Number($('game-count').value) || 50),
+    from: $('fetch-from').value || undefined,
+    to: $('fetch-to').value || undefined,
+    timeClasses,
+  };
+}
+
 $('import-form').addEventListener('submit', async (e) => {
   e.preventDefault();
+  if (job) { setStatus('An import is still running. Wait for it or cancel it first.'); return; }
   const btn = $('import-btn');
   const username = $('username').value.trim();
-  const max = Math.max(1, Math.min(50, Number($('game-count').value) || 15));
   btn.disabled = true;
+  const me = { cancelled: false };
+  job = me;
   try {
     let pgns;
     if (importSource === 'pgn') {
@@ -839,30 +957,64 @@ $('import-form').addEventListener('submit', async (e) => {
       if (!pgns.length) throw new Error('No games found. Paste PGN text that includes the moves.');
     } else {
       if (!username) throw new Error('Enter your username at the top first.');
+      const opts = fetchOptions();
+      if (!opts.timeClasses.length) throw new Error('Pick at least one time control.');
+      if (opts.from && opts.to && opts.from > opts.to) throw new Error('The start month is after the end month.');
+      fetchAbort = new AbortController();
+      $('import-cancel').hidden = false;
       setStatus(`Fetching games for ${username}…`);
-      pgns = importSource === 'lichess' ? await fetchLichess(username, max) : await fetchChessCom(username, max);
-      if (!pgns.length) throw new Error('No standard games found for that account.');
+      const onProgress = importSource === 'lichess'
+        ? ({ games }) => setStatus(`Downloading from Lichess… ${games} games so far`)
+        : ({ games, month, monthsDone, months }) => setStatus(`Fetching ${month} (${monthsDone} of ${months} months) · ${games} games found`);
+      const fetcher = importSource === 'lichess' ? fetchLichess : fetchChessCom;
+      pgns = await fetcher(username, { ...opts, onProgress, signal: fetchAbort.signal });
+      fetchAbort = null;
+      if (!pgns.length) throw new Error('No standard games match those filters.');
     }
-    const firstNew = state.games.length;
-    await addGames(pgns);
-    selectGame(firstNew);
+    if (me.cancelled) throw new DOMException('Cancelled', 'AbortError');
+    job = null;
+    setStatus(`Analysing ${pgns.length} game${pgns.length > 1 ? 's' : ''}…`);
+    const r = await addGames(pgns);
+    const first = r.added.find((g) => state.games.includes(g));
+    if (first) selectGame(state.games.indexOf(first));
+    const parts = [`Added ${r.analysed} game${r.analysed === 1 ? '' : 's'}`];
+    if (r.skipped) parts.push(`${r.skipped} already in your library`);
+    if (r.failed) parts.push(`${r.failed} couldn’t be read`);
+    if (r.cancelled) parts.push('stopped early');
+    setStatus(parts.join(' · ') + '.' + (storageFull ? ' Your browser storage is full, so some games won’t be remembered next visit.' : ''));
     if (importSource === 'pgn') $('pgn-input').value = '';
   } catch (err) {
-    const blocked = err instanceof TypeError;
-    setStatus(blocked ? 'Couldn’t reach the site. Check your connection, or paste PGN instead.' : err.message, true);
+    if (err.name === 'AbortError') setStatus('Import cancelled.');
+    else setStatus(err instanceof TypeError ? 'Couldn’t reach the site. Check your connection, or paste PGN instead.' : err.message, true);
   } finally {
+    if (job === me) job = null;
+    fetchAbort = null;
+    $('import-cancel').hidden = !job;
     btn.disabled = false;
   }
 });
+
+$('time-classes').innerHTML = TIME_CLASSES.map((t) => `<label class="inline" for="tc-${t}"><input type="checkbox" name="tc" id="tc-${t}" value="${t}" checked> ${t[0].toUpperCase() + t.slice(1)}</label>`).join('');
+
+$('import-cancel').addEventListener('click', () => {
+  if (fetchAbort) fetchAbort.abort();
+  if (job) job.cancelled = true;
+});
+
+document.querySelectorAll('input[name="scope"]').forEach((r) => r.addEventListener('change', () => {
+  $('game-count').disabled = document.querySelector('input[name="scope"]:checked').value === 'all';
+}));
 
 $('username').value = store.get('username', '');
 $('username').addEventListener('change', () => {
   const u = $('username').value.trim();
   store.set('username', u);
+  const changed = [];
   for (const g of state.games) {
     const c = detectUserColor(g.headers, u);
-    if (c && c !== g.userColor) setUserColor(g, c);
+    if (c && (c !== g.userColor || !g.colorKnown)) { setUserColor(g, c); changed.push(g); }
   }
+  library.put(changed.filter((g) => !g.sample && g.game).map(record));
   renderGameList();
   render();
   renderLower();
@@ -878,7 +1030,7 @@ $('as-color').addEventListener('change', () => {
   const g = currentGame();
   if (!g) return;
   setUserColor(g, $('as-color').value);
-  saveGames();
+  if (!g.sample && g.game) library.put([record(g)]);
   renderGameList();
   render();
   renderLower();
@@ -890,7 +1042,9 @@ $('clear-games').addEventListener('click', () => {
   state.index = 0;
   state.variation = null;
   state.mode = 'review';
-  saveGames();
+  if (job) job.cancelled = true;
+  library.clear();
+  store.set('games', []);
   renderGameList();
   render();
   renderLower();
@@ -910,7 +1064,7 @@ $('nav-prev').addEventListener('click', () => go(cursor() - 1));
 $('nav-next').addEventListener('click', () => go(cursor() + 1));
 $('nav-end').addEventListener('click', () => go(1e9));
 document.addEventListener('keydown', (e) => {
-  if (e.target.closest('input, textarea, select, button') || state.mode === 'train') return;
+  if (e.target.closest('input, textarea, select') || state.mode === 'train') return;
   if (e.key === 'ArrowLeft') { e.preventDefault(); go(cursor() - 1); }
   if (e.key === 'ArrowRight') { e.preventDefault(); go(cursor() + 1); }
   if (e.key === 'Home') { e.preventDefault(); go(0); }
@@ -918,20 +1072,54 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---------- start ----------
-const saved = store.get('games', []);
-renderGameList();
-render();
-renderLower();
-if (saved.length) {
-  addGames(saved.map((s) => s.pgn), { persist: false }).then(() => {
-    saved.forEach((s, i) => { if (s.userColor && state.games[i]) setUserColor(state.games[i], s.userColor); });
+async function boot() {
+  renderGameList();
+  render();
+  renderLower();
+  const records = (await library.all()).sort((x, y) => x.added - y.added);
+  const legacy = store.get('games', []);
+  if (records.length) {
+    const stale = [];
+    for (const r of records) {
+      const g = makeGame(r.pgn);
+      Object.assign(g, { key: r.key, added: r.added, userColor: r.userColor, colorKnown: r.colorKnown });
+      if (r.version === ANALYSIS_VERSION && r.game) {
+        g.game = r.game;
+        g.report = gameReport(g.game, g.userColor, { openingMoves: OPENING_MOVES });
+      } else {
+        stale.push(g);
+      }
+      state.games.push(g);
+    }
+    state.current = 0;
     renderGameList();
     render();
     renderLower();
-  });
-} else {
-  addGames(SAMPLES.map((s) => s.pgn), { userColor: 'w', persist: false, sample: true }).then(() => {
+    if (stale.length) {
+      setStatus(`Updating the analysis of ${stale.length} saved games…`);
+      await analyseGames(stale);
+      setStatus('');
+    }
+  } else if (legacy.length) {
+    // Games saved by an earlier version of the app.
+    const colors = new Map(legacy.map((l) => [compactPgn(l.pgn), l.userColor]));
+    const games = legacy.map((l) => l.pgn);
+    await addGames(games);
+    for (const g of state.games) {
+      const c = colors.get(g.pgn);
+      if (c) setUserColor(g, c);
+    }
+    library.put(state.games.filter((g) => g.game).map(record));
+    store.set('games', []);
+    setStatus('');
+    renderGameList();
+    render();
+    renderLower();
+  } else {
+    await addGames(SAMPLES.map((x) => x.pgn), { userColor: 'w', persist: false, sample: true });
+    setStatus('');
     go(4);
     renderLower();
-  });
+  }
 }
+boot();

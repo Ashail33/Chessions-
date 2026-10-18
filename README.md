@@ -22,7 +22,7 @@ Inspired by the heatmap layers on [chessyi.com/visualization](https://www.chessy
 
   Use **Hint** for the engine's choice and the most dominating move, **Take back** to retry, and **Analyse this game** to send a finished game to the report, patterns and trainer.
 
-- **Import** games by pasting PGN, or fetch recent games from **Lichess** or **Chess.com** by username.
+- **Import your whole history** from **Chess.com** or **Lichess** by username, or paste PGN. Choose the most recent N games or all of them, limit to a date range, and pick time controls (bullet, blitz, rapid, classical, daily). Chess.com is fetched month by month with live progress, and you can cancel at any point. Games are analysed in parallel workers (about a second per game per thread). They're stored in your browser (IndexedDB), so each game is analysed once and re-imports skip games you already have.
 - **Board overlays**:
   - *Control* heatmap: amber for White, indigo for Black, striped where contested.
   - *Freedom*: green dots for squares a side's pieces can safely reach, red crosses for squares they're denied, and a safe-move badge on each piece.
@@ -77,7 +77,8 @@ index.html, styles.css   UI
 src/analysis.js          attack maps, control, safe mobility, dominance score, move ranking
 src/insights.js          move assessment, principle tags, game reports, cross-game habits
 src/board.js, chart.js   board with overlays and arrows; dominance chart
-src/import.js            PGN splitting, Lichess and Chess.com fetchers
+src/import.js            PGN splitting/compaction, Lichess and Chess.com fetchers with date and time-control filters
+src/library.js           IndexedDB cache of imported games and their analysis
 src/worker.js            analyses games off the main thread
 src/engine.js            UCI wrapper around Stockfish in a Web Worker (WASM, with a pure-JS fallback)
 src/play.js              games against Stockfish: adaptive strength and punishing mistakes

@@ -59,18 +59,31 @@
         <textarea id="pgn-input" rows="5" placeholder="[Event &quot;...&quot;]&#10;1. e4 e5 2. Nf3 ..."></textarea>
       </div>
       <div data-pane="lichess" hidden>
-        <p class="hint">Fetches your most recent games from lichess.org using the username above.</p>
+        <p class="hint">Fetches your games from lichess.org for the username above.</p>
       </div>
       <div data-pane="chesscom" hidden>
-        <p class="hint">Fetches your most recent games from chess.com using the username above.</p>
+        <p class="hint">Fetches your games from chess.com for the username above.</p>
+      </div>
+      <div class="fetch-opts" id="fetch-opts" hidden>
+        <div class="scope" role="radiogroup" aria-label="Which games">
+          <label class="inline" for="scope-recent"><input type="radio" name="scope" id="scope-recent" value="recent" checked> Most recent</label>
+          <input id="game-count" type="number" min="1" value="50" aria-label="Number of recent games">
+          <label class="inline" for="scope-all"><input type="radio" name="scope" id="scope-all" value="all"> All games</label>
+        </div>
+        <div class="months">
+          <label for="fetch-from">From<input type="month" id="fetch-from"></label>
+          <label for="fetch-to">To<input type="month" id="fetch-to"></label>
+        </div>
+        <div class="tcs" id="time-classes" role="group" aria-label="Time controls"></div>
+        <p class="hint">Analysis takes about a second per game, spread over several threads. Games stay in this browser, so you only analyse each one once.</p>
       </div>
       <div class="row">
-        <label class="inline" for="game-count">Games <input id="game-count" type="number" min="1" max="50" value="15"></label>
         <button type="submit" class="btn primary" id="import-btn">Analyse</button>
+        <button type="button" class="btn" id="import-cancel" hidden>Cancel</button>
       </div>
       <p class="status" id="import-status" role="status"></p>
     </form>
-    <div class="list-head"><span class="eyebrow">Games</span><button type="button" class="link" id="clear-games">Clear</button></div>
+    <div class="list-head"><span class="eyebrow" id="games-count">Games</span><button type="button" class="link" id="clear-games">Clear</button></div>
     <ol class="game-list" id="game-list"></ol>
   </aside>
 

@@ -223,3 +223,19 @@ export function describeDeltas(d, color) {
 }
 
 export const pieceName = (t) => PIECE_NAMES[t];
+
+// Bump when analysis output changes, so cached results get recomputed.
+export const ANALYSIS_VERSION = 1;
+
+// A compact copy of a game analysis: everything the reports, chart and
+// trainer need, without per-position attack maps (recomputed on demand).
+export function slimGame(game) {
+  return {
+    headers: game.headers,
+    plies: game.plies,
+    positions: game.positions.map((p) => ({
+      fen: p.fen,
+      analysis: { dominance: p.analysis.dominance, w: { developed: p.analysis.w.developed }, b: { developed: p.analysis.b.developed } },
+    })),
+  };
+}

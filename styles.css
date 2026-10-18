@@ -119,6 +119,14 @@ input[type="number"] { width: 64px; }
 .arrow.dom polygon { fill: rgba(72, 76, 214, 0.8); }
 .import { display: grid; gap: 10px; }
 .import > div { display: grid; gap: 6px; }
+.fetch-opts { gap: 10px !important; }
+.scope { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+.scope input[type="number"] { width: 72px; }
+.months { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.months label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
+.months input { width: 100%; min-width: 0; }
+.tcs { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.tcs label { font-size: 13px; }
 .status { margin: 0; font-size: 13px; color: var(--muted); min-height: 1.2em; }
 .status.error { color: var(--bad); }
 .list-head { display: flex; justify-content: space-between; align-items: center; }
