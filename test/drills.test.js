@@ -46,13 +46,24 @@ test('mistakes, problem map and spaced repetition', () => {
   const mistakes = collectMistakes(library);
   assert.ok(mistakes.length >= 3);
   for (const m of mistakes) assert.ok(m.accept.length && m.fen && m.fundamental && m.piece && m.phase);
+  // One drill per position, even when it came up in several games.
+  assert.equal(new Set(mistakes.map((m) => m.fen.split(' ').slice(0, 4).join(' '))).size, mistakes.length);
+  const twice = collectMistakes([...library, ...library.map((g) => ({ ...g, key: `${g.key}-again` }))]);
+  assert.equal(twice.length, mistakes.length);
+  assert.ok(twice.every((m, k) => m.count === 2 * mistakes[k].count && m.gameKeys.length === 2 * mistakes[k].gameKeys.length));
   const map = problemMap(mistakes);
   assert.equal(map.rows.reduce((s, r) => s + r.n, 0), mistakes.length);
 
   const progress = newProgress();
   const first = nextDrill(mistakes, progress);
   recordAnswer(progress, first, false);
-  // A missed item comes straight back.
+  // A missed item waits for two others, then comes back.
+  const second = nextDrill(mistakes, progress);
+  assert.notEqual(second.id, first.id);
+  recordAnswer(progress, second, true);
+  const third = nextDrill(mistakes, progress);
+  assert.ok(third.id !== first.id && third.id !== second.id);
+  recordAnswer(progress, third, true);
   assert.equal(nextDrill(mistakes, progress).id, first.id);
   // Solving it moves it up a box and schedules it later.
   recordAnswer(progress, first, true);

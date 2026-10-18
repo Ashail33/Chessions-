@@ -41,9 +41,12 @@ export function isMistake(ply, engine) {
 }
 
 // Collect classified mistakes from analysed games (newest first).
+// The same position reached in several games (a habit in your usual opening)
+// is one drill, not one per game.
 // games: [{ key, game: { plies, positions }, engine, userColor, headers }]
 export function collectMistakes(games) {
   const out = [];
+  const byPos = new Map();
   for (const g of games) {
     if (!g.game) continue;
     g.game.plies.forEach((p, i) => {
@@ -54,8 +57,18 @@ export function collectMistakes(games) {
       if (e && e.best) accept.push(e.best);
       else if (p.alternatives) for (const a of p.alternatives) if (a.score >= p.alternatives[0].score - 3) accept.push(a.san);
       if (!accept.length) return;
-      out.push({
-        id: `${g.key}#${i}`,
+      const pos = g.game.positions[i].fen.split(' ').slice(0, 4).join(' ');
+      const seen = byPos.get(pos);
+      if (seen) {
+        seen.count++;
+        if (!seen.gameKeys.includes(g.key)) seen.gameKeys.push(g.key);
+        for (const a of accept) if (!seen.accept.includes(a)) seen.accept.push(a);
+        return;
+      }
+      const m = {
+        id: `pos:${pos}`,
+        count: 1,
+        gameKeys: [g.key],
         game: g,
         ply: i,
         fen: g.game.positions[i].fen,
@@ -70,7 +83,9 @@ export function collectMistakes(games) {
         fundamental: fundamentalOf(p, e),
         piece: pieceOfSan(p.san),
         phase: phaseOf(p.fullmove),
-      });
+      };
+      byPos.set(pos, m);
+      out.push(m);
     });
   }
   return out;
@@ -102,7 +117,8 @@ export function problemMap(mistakes) {
 
 // ---------- spaced repetition ----------
 // Rounds since an item was last seen before it is due again, per box.
-export const INTERVALS = [0, 3, 8, 20, 50];
+// A missed position waits for two others so drills don't ping-pong.
+export const INTERVALS = [3, 5, 10, 20, 50];
 export const MASTERED_BOX = 3;
 
 export function newProgress() {
@@ -115,7 +131,7 @@ export function matches(mistake, filter) {
     && (!filter.piece || mistake.piece === filter.piece)
     && (!filter.phase || mistake.phase === filter.phase)
     && (!filter.tag || mistake.tags.includes(filter.tag))
-    && (!filter.games || filter.games.includes(mistake.game.key));
+    && (!filter.games || mistake.gameKeys.some((k) => filter.games.includes(k)));
 }
 
 // Pick the next drill: overdue items in the lowest box first, then new ones.

@@ -1226,7 +1226,7 @@ function loadDrill() {
   const d = state.drill;
   const mistakes = myMistakes();
   const pool = mistakes.filter((m) => drillMatches(m, d.filter));
-  const skip = new Set(pool.length > 2 ? d.recent.slice(-1) : []);
+  const skip = new Set(d.recent.slice(-Math.min(3, pool.length - 1)));
   const item = nextDrill(pool, drillProgress, null, skip);
   if (!item) { stopDrill(); return; }
   d.item = item;
