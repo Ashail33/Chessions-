@@ -1,0 +1,11 @@
+{
+  "name": "chessions",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Learn chess opening principles by measuring board dominance in your own games.",
+  "type": "module",
+  "scripts": {
+    "start": "node scripts/serve.mjs 8080",
+    "test": "node --test"
+  }
+}

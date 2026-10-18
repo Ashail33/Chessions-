@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Chessions Dominance Lab</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%228%22 height=%228%22 fill=%22%23e8a014%22/%3E%3Crect x=%228%22 y=%228%22 width=%228%22 height=%228%22 fill=%22%23e8a014%22/%3E%3Crect x=%228%22 width=%228%22 height=%228%22 fill=%22%23484cd6%22/%3E%3Crect y=%228%22 width=%228%22 height=%228%22 fill=%22%23484cd6%22/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Young+Serif&family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>Chessions <span>Dominance Lab</span></h1>
+    <p>Learn openings by watching who owns the board. Skip the memorising.</p>
+  </div>
+  <label class="user">
+    <span>Your username</span>
+    <input id="username" type="text" placeholder="Lichess or Chess.com name" autocomplete="off" spellcheck="false">
+  </label>
+</header>
+
+<main class="layout">
+  <aside class="panel games" aria-label="Games">
+    <div class="tabs small" role="tablist" id="import-tabs">
+      <button type="button" role="tab" data-tab="pgn" aria-selected="true">Paste PGN</button>
+      <button type="button" role="tab" data-tab="lichess" aria-selected="false">Lichess</button>
+      <button type="button" role="tab" data-tab="chesscom" aria-selected="false">Chess.com</button>
+    </div>
+    <form id="import-form" class="import">
+      <div data-pane="pgn">
+        <label for="pgn-input" class="eyebrow">One or more games in PGN format</label>
+        <textarea id="pgn-input" rows="5" placeholder="[Event &quot;...&quot;]&#10;1. e4 e5 2. Nf3 ..."></textarea>
+      </div>
+      <div data-pane="lichess" hidden>
+        <p class="hint">Fetches your most recent games from lichess.org using the username above.</p>
+      </div>
+      <div data-pane="chesscom" hidden>
+        <p class="hint">Fetches your most recent games from chess.com using the username above.</p>
+      </div>
+      <div class="row">
+        <label class="inline" for="game-count">Games <input id="game-count" type="number" min="1" max="50" value="15"></label>
+        <button type="submit" class="btn primary" id="import-btn">Analyse</button>
+      </div>
+      <p class="status" id="import-status" role="status"></p>
+    </form>
+    <div class="list-head"><span class="eyebrow">Games</span><button type="button" class="link" id="clear-games">Clear</button></div>
+    <ol class="game-list" id="game-list"></ol>
+  </aside>
+
+  <section class="stage" aria-label="Board">
+    <div class="game-title">
+      <div id="game-title"><strong>No game loaded</strong></div>
+      <label class="inline" for="as-color">Analyse as
+        <select id="as-color"><option value="w">White</option><option value="b">Black</option></select>
+      </label>
+    </div>
+    <div class="board-wrap">
+      <div id="board"></div>
+      <div class="share" aria-label="Board share">
+        <div class="share-bar"><span id="share-w"></span></div>
+        <div class="share-labels"><span id="share-w-label">White 50%</span><span id="share-b-label">Black 50%</span></div>
+      </div>
+    </div>
+    <div class="controls">
+      <div class="nav">
+        <button type="button" class="btn icon" id="nav-start" aria-label="First move">&#x23EE;&#xFE0E;</button>
+        <button type="button" class="btn icon" id="nav-prev" aria-label="Previous move">&#x25C0;&#xFE0E;</button>
+        <span id="nav-pos" class="mono">Start</span>
+        <button type="button" class="btn icon" id="nav-next" aria-label="Next move">&#x25B6;&#xFE0E;</button>
+        <button type="button" class="btn icon" id="nav-end" aria-label="Last move">&#x23ED;&#xFE0E;</button>
+        <button type="button" class="btn icon" id="flip" aria-label="Flip board">&#x21C5;&#xFE0E;</button>
+      </div>
+      <div class="chips" role="radiogroup" aria-label="Overlay">
+        <button type="button" class="chip" data-overlay="control">Control</button>
+        <button type="button" class="chip" data-overlay="freedom">Freedom</button>
+        <button type="button" class="chip" data-overlay="impact">Move impact</button>
+        <button type="button" class="chip" data-overlay="none">Plain</button>
+      </div>
+      <div class="opts">
+        <label class="inline" for="freedom-side">Freedom of
+          <select id="freedom-side"><option value="opp">my opponent</option><option value="me">my pieces</option></select>
+        </label>
+        <label class="inline check" for="show-best"><input type="checkbox" id="show-best" checked> Show most dominating move</label>
+      </div>
+      <p class="legend" id="legend"></p>
+    </div>
+    <div class="variation" id="variation" hidden>
+      <span>Exploring your own line: <strong id="variation-moves"></strong></span>
+      <button type="button" class="btn" id="variation-exit">Back to game</button>
+    </div>
+    <div class="chart-wrap">
+      <div class="chart-head"><span class="eyebrow">Board dominance through the game</span><span class="hint">Above the line: you own more of the board. Shaded: opening (moves 1&ndash;12).</span></div>
+      <div id="chart" class="chart"></div>
+    </div>
+  </section>
+
+  <aside class="panel coach" aria-label="Coach">
+    <div id="coach"></div>
+    <div class="metrics">
+      <div class="metrics-head"><span class="eyebrow">Position</span><span class="mono">White</span><span class="mono">Black</span></div>
+      <dl id="metrics"></dl>
+    </div>
+    <div>
+      <span class="eyebrow">Moves</span>
+      <ol class="moves" id="moves"></ol>
+    </div>
+  </aside>
+</main>
+
+<section class="lower">
+  <div class="tabs" role="tablist" id="lower-tabs">
+    <button type="button" role="tab" data-tab="report" aria-selected="true">Game report</button>
+    <button type="button" role="tab" data-tab="patterns" aria-selected="false">Your patterns</button>
+    <button type="button" role="tab" data-tab="trainer" aria-selected="false">Trainer</button>
+    <button type="button" role="tab" data-tab="how" aria-selected="false">How it works</button>
+  </div>
+  <div class="pane" data-pane="report" id="report"></div>
+  <div class="pane" data-pane="patterns" id="patterns" hidden></div>
+  <div class="pane" data-pane="trainer" id="trainer" hidden></div>
+  <div class="pane prose" data-pane="how" hidden>
+    <h2>Reading the board instead of memorising it</h2>
+    <p>Opening principles like "develop your pieces", "fight for the center" and "castle early" all exist for one reason: they give you more of the board and leave your opponent less. This tool measures that directly, so you can see each principle at work in your own games.</p>
+    <h3>What gets measured</h3>
+    <dl class="defs">
+      <dt>Squares controlled</dt><dd>Squares beyond your first two ranks that you own. A square belongs to whoever attacks it more often. A pawn's guard beats any number of pieces, because no piece wants to stand where a pawn can take it.</dd>
+      <dt>Center</dt><dd>Control of d4, e4, d5 and e5 counts double. The twelve squares around them count once.</dd>
+      <dt>Space</dt><dd>Squares you own in the opponent's half of the board.</dd>
+      <dt>Safe moves</dt><dd>Moves your knights, bishops, rooks and queen can make without losing material in the exchange that follows. This is the main measure of "hard to move": if you take away your opponent's safe moves, they run out of good plans.</dd>
+      <dt>Cramped pieces</dt><dd>Pieces with one safe move or none.</dd>
+      <dt>King safety</dt><dd>A castled king with pawns in front of it scores well. Losing the right to castle without castling scores badly.</dd>
+      <dt>Board share</dt><dd>All of the above combined into one number, shown as the share of the board each side dominates.</dd>
+    </dl>
+    <h3>How moves are graded</h3>
+    <p>For every move in the opening (the first 20 moves of each side), every legal alternative is tried and scored by material plus board dominance. Each move is graded by how far it falls short of the most dominating option: <span class="pill dominant">Dominant</span> <span class="pill good">Good</span> <span class="pill passive">Passive</span> <span class="pill concession">Concession</span> <span class="pill mistake">Mistake</span>.</p>
+    <h3>Limits</h3>
+    <p>This is a positional lens, not a chess engine. It looks one move ahead with a simple exchange check, so it misjudges sacrifices, deep tactics and forced sequences. Use it to train your sense of space and freedom, and use an engine to check tactics.</p>
+  </div>
+</section>
+
+<script type="module" src="src/app.js"></script>
+</body>
+</html>
