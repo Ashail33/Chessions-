@@ -13,7 +13,7 @@ export function splitPgn(text) {
 
 // Keep only the headers the app uses and drop comments (clocks, evals), so
 // large libraries stay small in storage.
-const KEEP = ['Event', 'Site', 'Date', 'White', 'Black', 'Result', 'WhiteElo', 'BlackElo', 'TimeControl', 'ECO', 'Link', 'FEN', 'SetUp'];
+const KEEP = ['Event', 'Site', 'Date', 'UTCDate', 'White', 'Black', 'Result', 'WhiteElo', 'BlackElo', 'TimeControl', 'ECO', 'Opening', 'ECOUrl', 'Link', 'FEN', 'SetUp'];
 export function compactPgn(pgn) {
   const headers = [];
   for (const m of pgn.matchAll(/^\[(\w+)\s+"([^"]*)"\]\s*$/gm)) if (KEEP.includes(m[1])) headers.push(`[${m[1]} "${m[2]}"]`);

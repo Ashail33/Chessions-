@@ -1,10 +1,13 @@
 import { Chess } from '../vendor/chess.js';
 import { analyzePosition, rankMoves, dominanceShare, other, LABELS } from './analysis.js';
-import { assessMove, habitPatterns, describeDeltas, TAGS } from './insights.js';
+import { assessMove, describeDeltas, TAGS } from './insights.js';
 import { splitPgn, fetchLichess, fetchChessCom, TIME_CLASSES } from './import.js';
 import { Collection, OPENING_MOVES } from './collection.js';
 import { Board } from './board.js';
-import { renderChart } from './chart.js';
+import { renderChart, miniChart } from './chart.js';
+import { gameFacts, aggregate, filterFacts } from './stats.js';
+import { checkGame, NAG } from './enginecheck.js';
+import { engineGrade } from './play.js';
 import { SAMPLES } from './samples.js';
 import { Engine, formatScore, uciToMove } from './engine.js';
 import { PlaySession, LEVELS, PUNISH, sideName } from './play.js';
@@ -36,6 +39,9 @@ const state = {
   hint: null,
   quiz: null,
   importMsg: { text: '', error: false },
+  statsFilter: { color: 'all', timeClass: 'all' },
+  gamesFilter: null, // opening key shown in the games sheet
+  check: null, // Stockfish game check in progress
 };
 let engine = null;
 
@@ -179,7 +185,7 @@ function chipGroup(name, options, value) {
 
 function moveStrip(plies, current) {
   if (!plies.length) return '';
-  return `<div class="strip" id="strip">${plies.map((p, i) => `${p.color === 'w' || i === 0 ? `<span class="num">${p.fullmove}.</span>` : ''}<button type="button" data-ply="${i + 1}" aria-current="${current === i + 1}">${p.dot ? `<i class="dot ${p.dot}"></i>` : ''}${esc(p.san)}</button>`).join('')}</div>`;
+  return `<div class="strip" id="strip">${plies.map((p, i) => `${p.color === 'w' || i === 0 ? `<span class="num">${p.fullmove}.</span>` : ''}<button type="button" data-ply="${i + 1}" aria-current="${current === i + 1}">${p.dot ? `<i class="dot ${p.dot}"></i>` : ''}${esc(p.san)}${p.nag ? `<span class="nag ${p.nag.cls}">${p.nag.text}</span>` : ''}</button>`).join('')}</div>`;
 }
 
 function scrollStrip() {
@@ -313,7 +319,10 @@ function bindPanel(el) {
   el.querySelectorAll('.chips[data-group]').forEach((group) => {
     group.querySelectorAll('[data-value]').forEach((b) => {
       b.onclick = () => {
-        if (group.dataset.group === 'insights') state.insights = b.dataset.value;
+        const key = group.dataset.group;
+        if (key === 'insights') state.insights = b.dataset.value;
+        else if (key === 'statColor') state.statsFilter.color = b.dataset.value;
+        else if (key === 'statTime') state.statsFilter.timeClass = b.dataset.value;
         else {
           state.setup[group.dataset.group] = b.dataset.value;
           store.set('play', state.setup);
@@ -436,10 +445,75 @@ function reviewPanel() {
       ? `<ol class="alts">${p.alternatives.map((m, i) => `<li><button type="button" data-action="tryAlt" data-alt="${i}"><span>${i + 1}. <b class="mono">${esc(m.san)}</b>${m.san === p.san ? ' (played)' : ''}</span><span class="muted">${i === 0 ? 'best' : '−' + (p.alternatives[0].score - m.score).toFixed(1)}</span></button></li>`).join('')}</ol>`
       : '';
     const details = `<p>${describeDeltas(p.deltas)}</p>${tagList(p.tags)}${alts ? `<p class="label">Top moves here (tap to try one)</p>${alts}` : ''}`;
-    card = `<article class="verdict tone-${p.label || 'neutral'}">${head}${best}${why(details)}</article>`;
+    card = `<article class="verdict tone-${p.label || 'neutral'}">${head}${best}${engineLine(g, p.ply)}${why(details)}</article>`;
   }
-  const plies = g.game.plies.map((x) => ({ ...x, dot: x.label }));
-  return `${banner}${card}${moveStrip(plies, state.variation ? -1 : state.index)}<div class="chart" id="chart"></div>`;
+  const plies = g.game.plies.map((x, i) => ({ ...x, dot: x.label, nag: nagFor(g, i) }));
+  const key = g.engine ? '<p class="key"><span><i class="all"></i>Board control</span><span><i class="engine"></i>Engine evaluation</span></p>' : '';
+  return `${banner}${card}${checkBar([g])}${moveStrip(plies, state.variation ? -1 : state.index)}<div class="chart" id="chart"></div>${key}`;
+}
+
+function engineLine(g, plyIndex) {
+  const e = g.engine && g.engine.plies[plyIndex];
+  if (!e) return '';
+  const grade = engineGrade(e.loss);
+  return `<p class="engine-line"><span class="src">Engine</span>${pill(grade.tone, grade.text)}${e.loss >= 20 ? `<span class="mono">\u2212${(e.loss / 100).toFixed(1)}</span>` : ''}${e.best ? `<span>best <b class="mono">${esc(e.best)}</b></span>` : ''}</p>`;
+}
+
+function nagFor(g, i) {
+  const e = g.engine && g.engine.plies[i];
+  return e && NAG[e.grade] ? { text: NAG[e.grade], cls: e.grade } : null;
+}
+
+// Offer, or show progress of, a Stockfish check for these games.
+function checkBar(list, label = 'Check this game with Stockfish', waiting = list.filter((g) => g.game && !g.engine).length) {
+  if (state.check) {
+    const c = state.check;
+    const pctDone = c.total ? (100 * c.done) / c.total : 0;
+    const which = c.list.length > 1 ? `Game ${c.i + 1} of ${c.list.length}` : 'Stockfish is checking';
+    return `<div class="check-bar"><span id="check-text">${which}</span><div class="progress"><span id="check-progress" style="width:${pctDone}%"></span></div><button type="button" class="btn small" data-action="cancelCheck">Cancel</button></div>`;
+  }
+  const todo = list.filter((g) => g.game && !g.engine);
+  if (!todo.length) return '';
+  state.checkTargets = todo;
+  return `<div class="check-bar"><span>${waiting > 1 ? `${waiting} games not checked yet` : 'Find tactical mistakes too'}</span><button type="button" class="btn small" data-action="runCheck">${todo.length > 1 ? label : 'Check with Stockfish'}</button></div>`;
+}
+
+async function runEngineCheck(list) {
+  if (state.check || !list.length) return;
+  if (!engine) engine = new Engine();
+  state.check = { list, i: 0, done: 0, total: 0, cancelled: false };
+  render();
+  try {
+    await engine.ready;
+  } catch (err) {
+    state.check = null;
+    engine = null;
+    setImportMsg(`Stockfish couldn\u2019t start here (${err.message}).`, true);
+    return;
+  }
+  for (const g of list) {
+    const c = state.check;
+    if (!c || c.cancelled) break;
+    const res = await checkGame(engine, g.game, {
+      movetime: 80,
+      isCancelled: () => !state.check || state.check.cancelled,
+      onProgress: (done, total) => {
+        c.done = done;
+        c.total = total;
+        const bar = $('check-progress');
+        if (bar) bar.style.width = `${(100 * done) / total}%`;
+      },
+    });
+    if (res) {
+      g.engine = res;
+      games.save(g);
+    }
+    c.i++;
+    c.done = 0;
+    if (c.i < list.length) render();
+  }
+  state.check = null;
+  render();
 }
 
 function drawChart(el) {
@@ -452,6 +526,7 @@ function drawChart(el) {
     current: state.variation ? state.variation.base : state.index,
     openingPlies: OPENING_MOVES * 2,
     onSelect: (i) => { state.variation = null; go(i); },
+    engine: g.engine ? g.engine.evals.map((v) => sign * v) : null,
   });
 }
 
@@ -482,36 +557,120 @@ function gameInsights() {
       <div class="tile"><b>${r.castledBy ? 'Move ' + r.castledBy : 'No'}</b><span>Castled</span></div>
       <div class="tile"><b>${r.developedBy8}/4</b><span>Minors out by move 8</span></div>
     </div>
+    ${engineBlock(g)}
     <section class="block"><h3>Your opening moves</h3>${labelBar(r.counts)}</section>
     <section class="block"><h3>Turning points</h3>${r.turningPoints.length ? `<ul class="list">${r.turningPoints.map((p) => `<li><button type="button" data-action="jump" data-jump="${p.ply}"><span><b class="mono">${moveNo(p)} ${esc(p.san)}</b> ${pill(p.label, LABELS[p.label].text)}</span><span class="muted">Best was <b class="mono">${esc(p.best.san)}</b></span></button></li>`).join('')}</ul>` : '<p class="muted">No big misses in the opening.</p>'}</section>
     ${leaks.length ? `<section class="block"><h3>What cost you board</h3>${why(`<ul class="tags">${leaks.map(([t, n]) => `<li class="${TAGS[t].tone}"><b>${TAGS[t].text} ×${n}</b> ${TAGS[t].lesson}</li>`).join('')}</ul>`, leaks.map(([t, n]) => `${TAGS[t].text} ×${n}`).join(' · '))}</section>` : ''}`;
 }
 
+function engineBlock(g) {
+  if (!g.engine) return `<section class="block"><h3>Engine check</h3>${checkBar([g]) || '<p class="muted">Not checked yet.</p>'}</section>`;
+  const f = gameFacts(g);
+  const misses = g.game.plies
+    .map((p, i) => ({ p, e: g.engine.plies[i] }))
+    .filter(({ p, e }) => p.color === g.userColor && e && e.loss >= 50)
+    .sort((a, b) => b.e.loss - a.e.loss)
+    .slice(0, 3);
+  return `<section class="block"><h3>Engine check</h3>
+    <div class="tiles">
+      <div class="tile"><b>${f.engine.acpl === null ? '\u2013' : Math.round(f.engine.acpl)}</b><span>Avg loss per move (centipawns)</span></div>
+      <div class="tile"><b class="${f.engine.blunders ? 'neg' : ''}">${f.engine.blunders}</b><span>Blunders</span></div>
+      <div class="tile"><b>${f.engine.mistakes}</b><span>Mistakes</span></div>
+      <div class="tile"><b>${f.engine.inaccuracies}</b><span>Inaccuracies</span></div>
+    </div>
+    ${misses.length ? `<ul class="list">${misses.map(({ p, e }) => `<li><button type="button" data-action="jump" data-jump="${p.ply}"><span><b class="mono">${moveNo(p)} ${esc(p.san)}${NAG[e.grade] || ''}</b> ${pill(engineGrade(e.loss).tone, engineGrade(e.loss).text)}</span><span class="muted">Lost ${(e.loss / 100).toFixed(1)} pawns \u00b7 best was <b class="mono">${esc(e.best || '?')}</b></span></button></li>`).join('')}</ul>` : '<p class="muted">No engine mistakes. Clean game.</p>'}
+  </section>`;
+}
+
 function allInsights(own) {
   if (own.length < 2) return '<article class="empty-card"><p>Import a few of your games to see which habits win you the board.</p><button type="button" class="btn primary wide" data-action="openImport">Import games</button></article>';
-  const counts = {};
-  const tags = {};
-  for (const g of own) {
-    for (const [k, n] of Object.entries(g.report.counts)) counts[k] = (counts[k] || 0) + n;
-    for (const [k, n] of Object.entries(g.report.tagCounts)) tags[k] = (tags[k] || 0) + n;
+  const allFacts = own.map(gameFacts);
+  const f = state.statsFilter;
+  const tcs = [...new Set(allFacts.map((x) => x.timeClass).filter(Boolean))];
+  if (f.timeClass !== 'all' && !tcs.includes(f.timeClass)) f.timeClass = 'all';
+  const facts = filterFacts(allFacts, f);
+  const filters = `<div class="filters">
+    ${chipGroup('statColor', [{ value: 'all', text: 'Both colours' }, { value: 'w', text: 'As White' }, { value: 'b', text: 'As Black' }], f.color)}
+    ${tcs.length > 1 ? chipGroup('statTime', [{ value: 'all', text: 'All speeds' }, ...tcs.map((t) => ({ value: t, text: t[0].toUpperCase() + t.slice(1) }))], f.timeClass) : ''}
+  </div>`;
+  if (facts.length < 2) return `${filters}<article class="empty-card"><p>Fewer than two games match these filters.</p></article>`;
+  const a = aggregate(facts);
+  state.openingRows = a.openings;
+
+  const tiles = `<div class="tiles">
+    <div class="tile"><b>${a.n}</b><span>Games</span></div>
+    <div class="tile"><b>${pct(a.score)}</b><span>Score</span></div>
+    <div class="tile"><b class="${a.board12 >= 0 ? 'pos' : 'neg'}">${fmtSigned(a.board12)}</b><span>Board after move 12</span></div>
+    <div class="tile"><b>${a.engine ? Math.round(a.engine.acpl) : a.avgGap.toFixed(1)}</b><span>${a.engine ? `Engine loss per move (${a.engine.checked} checked)` : 'Avg gap to best move'}</span></div>
+  </div>`;
+
+  // Are you improving?
+  let trend = '';
+  if (a.trend.length >= 4) {
+    const imp = a.improvement;
+    const diff = imp ? imp.recent - imp.earlier : null;
+    const verdict = imp ? `Your last ${imp.size} games average <b class="${diff >= 0 ? 'trend-up' : 'trend-down'}">${fmtSigned(imp.recent)}</b> board at move 12, against ${fmtSigned(imp.earlier)} in your first ${imp.size}.` : '';
+    const n = a.trend.length;
+    trend = `<section class="block"><h3>Are you improving?</h3>${verdict ? `<p class="callout-line">${verdict}</p>` : ''}
+      <div class="mini">${miniChart({ series: [{ values: a.trend.map((t) => t.board12), cls: 'all', dots: true }, { values: a.trend.map((t) => t.rolling), cls: 'rolling' }], yLimit: 60, xTicks: [0, n - 1], xLabel: (i) => (i === 0 ? 'oldest' : 'newest') })}</div>
+      <p class="key"><span><i class="dots"></i>Each game</span><span><i class="rolling"></i>Rolling average</span></p></section>`;
   }
-  const rows = habitPatterns(own.map((g) => g.report));
-  const leaks = Object.entries(tags).filter(([t]) => TAGS[t].tone === 'warn' || TAGS[t].tone === 'bad').sort((a, b) => b[1] - a[1]).slice(0, 4);
+
+  // Where games slip
+  let slip = '';
+  if (a.curves.all.length > 4) {
+    const plies = Math.max(a.curves.all.length, a.curves.wins.length, a.curves.losses.length);
+    const ticks = [0, 10, 20, 30, 40].filter((t) => t < plies);
+    const line = a.slip ? `In games you lose, your board share drops below zero for good around <b>move ${a.slip}</b>.` : a.curves.losses.length ? 'Your losses aren’t decided by the opening board. Look at the engine check for tactics.' : '';
+    slip = `<section class="block"><h3>Where your games slip</h3>${line ? `<p class="callout-line">${line}</p>` : ''}
+      <div class="mini">${miniChart({ series: [{ values: a.curves.all, cls: 'all' }, { values: a.curves.wins, cls: 'wins' }, { values: a.curves.losses, cls: 'losses' }], yLimit: 40, xTicks: ticks, xLabel: (i) => `move ${i / 2 + 1}` })}</div>
+      <p class="key"><span><i class="all"></i>All games</span>${a.curves.wins.length ? '<span><i class="wins"></i>Wins</span>' : ''}${a.curves.losses.length ? '<span><i class="losses"></i>Losses</span>' : ''}</p></section>`;
+  }
+
+  // Openings
+  const top = a.openings.slice(0, 8);
+  const openings = `<section class="block"><h3>Your openings</h3><p class="muted small">Grouped by the first two moves of each game. Tap one to see those games.</p>
+    <ul class="rows">${top.map((o, i) => `<li style="padding:0;border:0"><button type="button" data-action="openingGames" data-opening="${i}">
+      <div class="row-head"><span class="mono">${esc(o.moves)}</span><span class="muted small">as ${sideName(o.color)}</span></div>
+      ${o.name ? `<span class="muted small">${esc(o.name)}</span>` : ''}
+      <div class="row-meta"><span><b>${o.n}</b> game${o.n > 1 ? 's' : ''}</span><span>score <b>${pct(o.score)}</b></span><span>board at 12 <b class="${o.board12 >= 0 ? 'pos' : 'neg'}">${fmtSigned(o.board12)}</b></span></div>
+    </button></li>`).join('')}</ul></section>`;
+
+  // Principles scorecard
+  const principles = `<section class="block"><h3>Principles scorecard</h3><p class="muted small">How often each habit shows up in your openings${a.principles.some((p) => p.recent !== null) ? ', recently and before' : ''}.</p>
+    <ul class="rows">${a.principles.map((p) => {
+      const change = p.recent !== null && p.earlier !== null ? p.recent - p.earlier : null;
+      const better = change === null ? null : p.good ? change > 0.05 : change < -0.05;
+      const worse = change === null ? null : p.good ? change < -0.05 : change > 0.05;
+      return `<li><div class="row-head"><b>${p.text}</b><span class="mono">${pct(p.rate)}</span></div>
+        <div class="meter ${p.good ? '' : 'warn'}"><span style="width:${Math.round((p.rate || 0) * 100)}%"></span></div>
+        ${change !== null ? `<span class="small ${better ? 'trend-up' : worse ? 'trend-down' : 'muted'}">Recent ${pct(p.recent)} vs earlier ${pct(p.earlier)}${better ? ', improving' : worse ? ', slipping' : ''}</span>` : ''}</li>`;
+    }).join('')}</ul></section>`;
+
+  // Habits with / without (existing view)
+  const rows = a.habits;
   const scale = Math.max(10, ...rows.flatMap((h) => [Math.abs(h.yes.dominance || 0), Math.abs(h.no.dominance || 0)]));
   const row = (k, x) => (x.n
     ? `<div class="habit-row"><span class="k">${k}</span>${bar(x.dominance)}<span class="v">${fmtSigned(x.dominance)}</span><span class="s">${pct(x.score)} won</span></div>`
     : `<div class="habit-row"><span class="k">${k}</span><span class="muted none">No games yet</span></div>`);
   const bar = (v) => (v === null ? '<span class="hbar empty"></span>' : `<span class="hbar ${v >= 0 ? 'pos' : 'neg'}" style="--w:${Math.min(50, (50 * Math.abs(v)) / scale)}%"></span>`);
-  return `
-    <section class="block"><h3>Which habits win you the board</h3>
-      <p class="muted small">Your board share after move 12, in games with and without each habit.</p>
-      <ul class="habits">${rows.map((h) => `<li>
-        <div class="habit-head"><b>${h.text}</b><span class="muted">${h.yes.n} of ${h.yes.n + h.no.n} games</span></div>
-        ${row('With', h.yes)}${row('Without', h.no)}
-      </li>`).join('')}</ul>
-    </section>
-    <section class="block"><h3>All your opening moves</h3>${labelBar(counts)}</section>
-    ${leaks.length ? `<section class="block"><h3>Your most common leaks</h3><ul class="tags">${leaks.map(([t, n]) => `<li class="${TAGS[t].tone}"><b>${TAGS[t].text} ×${n}</b> ${TAGS[t].lesson}</li>`).join('')}</ul></section>` : ''}`;
+  const habits = `<section class="block"><h3>Which habits win you the board</h3>
+    ${why(`<p class="muted small">Your board share after move 12, in games with and without each habit.</p><ul class="habits">${rows.map((h) => `<li><div class="habit-head"><b>${h.text}</b><span class="muted">${h.yes.n} of ${h.yes.n + h.no.n} games</span></div>${row('With', h.yes)}${row('Without', h.no)}</li>`).join('')}</ul>`, 'Compare games with and without each habit')}
+  </section>`;
+
+  // Costliest pieces
+  const maxGap = Math.max(...a.pieces.map((p) => p.avgGap), 1);
+  const pieces = a.pieces.length ? `<section class="block"><h3>Which pieces cost you board</h3><p class="muted small">Average gap to the most dominating move, by the piece you moved.</p>
+    <ul class="rows">${a.pieces.map((p) => `<li><div class="row-head"><b>${p.name}</b><span class="muted small">${p.n} moves · ${pct(p.costly)} costly</span></div><div class="meter warn"><span style="width:${Math.round((100 * p.avgGap) / maxGap)}%"></span></div></li>`).join('')}</ul></section>` : '';
+
+  // Engine
+  const unchecked = facts.filter((x) => !x.engine).map((x) => x.game);
+  const engineSec = `<section class="block"><h3>Engine check</h3>
+    ${a.engine ? `<p class="callout-line">Across ${a.engine.checked} checked game${a.engine.checked > 1 ? 's' : ''}: <b>${Math.round(a.engine.acpl)}</b> centipawns lost per move, <b>${a.engine.blundersPerGame.toFixed(1)}</b> blunders and <b>${a.engine.mistakesPerGame.toFixed(1)}</b> mistakes per game.</p>` : '<p class="muted small">Stockfish checks catch the tactics board control can’t see.</p>'}
+    ${checkBar(unchecked.slice(0, 10), `Check ${Math.min(10, unchecked.length)} with Stockfish`, unchecked.length)}
+  </section>`;
+
+  return `${filters}${tiles}${trend}${slip}${openings}${principles}${pieces}${habits}${engineSec}`;
 }
 
 // ---------- Train ----------
@@ -578,6 +737,7 @@ function answerQuiz(m) {
 
 // ---------- play actions ----------
 async function startGame() {
+  if (state.check) state.check.cancelled = true;
   if (!engine) engine = new Engine();
   state.engineError = null;
   const pick = state.setup.color;
@@ -646,6 +806,9 @@ const ACTIONS = {
   },
   jump: (b) => { state.variation = null; setScreen('review'); go(Number(b.dataset.jump)); },
   startQuiz,
+  runCheck: () => runEngineCheck(state.checkTargets || []),
+  cancelCheck: () => { if (state.check) state.check.cancelled = true; },
+  openingGames: (b) => { const o = state.openingRows && state.openingRows[Number(b.dataset.opening)]; if (o) { state.gamesFilter = o; openSheet('games'); } },
   skipQuiz: () => { const q = state.quiz; q.i = (q.i + 1) % q.items.length; loadQuiz(); },
   nextQuiz: () => { const q = state.quiz; q.i = (q.i + 1) % q.items.length; loadQuiz(); },
   stopQuiz: () => { state.quiz = null; render(); },
@@ -687,14 +850,17 @@ function closeSheet() {
 function renderSheet() {
   const body = $('sheet-body');
   if (sheetKind === 'games') {
-    $('sheet-title').textContent = games.games.length ? `Your games (${games.games.length})` : 'Your games';
-    body.innerHTML = `<button type="button" class="btn primary wide" id="sheet-import">Import games</button>
-      <ul class="game-list">${games.games.map((g, i) => {
+    const of = state.gamesFilter;
+    const shown = games.games.map((g, i) => [g, i]).filter(([g]) => !of || (g.game && gameFacts(g).opening.key === of.key));
+    $('sheet-title').textContent = of ? `${of.n} game${of.n > 1 ? 's' : ''} with this opening` : games.games.length ? `Your games (${games.games.length})` : 'Your games';
+    body.innerHTML = `${of ? `<div class="check-bar"><span class="mono">${esc(of.moves)}</span><button type="button" class="btn small" id="sheet-all">Show all</button></div>` : '<button type="button" class="btn primary wide" id="sheet-import">Import games</button>'}
+      <ul class="game-list">${shown.map(([g, i]) => {
         const h = g.headers;
         const meta = g.error ? 'Couldn’t read' : !g.game ? 'Analysing…' : [h.Date && !h.Date.startsWith('?') ? h.Date.replace(/\.\?\?/g, '') : null, `as ${sideName(g.userColor)}`, h.Result].filter(Boolean).join(' · ');
         return `<li><button type="button" data-game="${i}" aria-current="${i === state.current}"><b>${esc(h.White || '?')} – ${esc(h.Black || '?')}</b><span>${esc(meta)}${g.sample ? ' · example' : ''}</span></button></li>`;
       }).join('')}</ul>`;
-    $('sheet-import').onclick = () => openSheet('import');
+    if ($('sheet-import')) $('sheet-import').onclick = () => openSheet('import');
+    if ($('sheet-all')) $('sheet-all').onclick = () => { state.gamesFilter = null; renderSheet(); };
     body.querySelectorAll('[data-game]').forEach((b) => { b.onclick = () => { selectGame(Number(b.dataset.game)); setScreen('review'); closeSheet(); }; });
   } else if (sheetKind === 'import') {
     $('sheet-title').textContent = 'Import games';
@@ -754,7 +920,7 @@ function setUsername(u) {
 
 $('sheet-close').onclick = closeSheet;
 sheet.addEventListener('click', (e) => { if (e.target === sheet) closeSheet(); });
-sheet.addEventListener('close', () => { sheetKind = null; });
+sheet.addEventListener('close', () => { sheetKind = null; state.gamesFilter = null; });
 $('open-settings').onclick = () => openSheet('settings');
 
 // ---------- import ----------

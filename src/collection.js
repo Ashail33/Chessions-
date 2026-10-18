@@ -61,7 +61,7 @@ function readHeaders(pgn) {
   return h;
 }
 
-const record = (g) => ({ key: g.key, pgn: g.pgn, userColor: g.userColor, colorKnown: g.colorKnown, added: g.added, game: g.game, version: ANALYSIS_VERSION });
+const record = (g) => ({ key: g.key, pgn: g.pgn, userColor: g.userColor, colorKnown: g.colorKnown, added: g.added, game: g.game, engine: g.engine || null, version: ANALYSIS_VERSION });
 
 function throttle(fn, ms) {
   let timer = null;
@@ -161,6 +161,11 @@ export class Collection {
     return { analysed: done - failed, failed, cancelled: me.cancelled };
   }
 
+  // Save a game after adding to it (for example an engine check).
+  save(g) {
+    if (!g.sample && g.game) library.put([record(g)]);
+  }
+
   cancel() {
     if (this.job) this.job.cancelled = true;
   }
@@ -200,7 +205,7 @@ export class Collection {
     const stale = [];
     for (const r of records) {
       const g = this.make(r.pgn);
-      Object.assign(g, { key: r.key, added: r.added, userColor: r.userColor, colorKnown: r.colorKnown });
+      Object.assign(g, { key: r.key, added: r.added, userColor: r.userColor, colorKnown: r.colorKnown, engine: r.engine || null });
       if (r.version === ANALYSIS_VERSION && r.game) {
         g.game = r.game;
         g.report = gameReport(g.game, g.userColor, { openingMoves: OPENING_MOVES });

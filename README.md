@@ -35,6 +35,11 @@ The app has four screens, switched from the tab bar: **Play** (Stockfish), **Rev
 - **Your patterns**: your games split by habit (castled by move 10, 3+ minors out by move 8, early queen, repeated piece moves, early edge pawns). You can compare your board dominance and score with and without each habit, so you learn which principles matter *for you*, from your own games.
 - **Trainer**: positions from your games where a much more dominating move existed. Find it on the board and see how your choice ranks.
 
+### Stats and engine checks
+
+- **Engine check:** in Review, *Check with Stockfish* runs the engine over every position of a game (about 80 ms each). Moves get the usual `?!` / `?` / `??` marks, the verdict shows the engine's grade, centipawn loss and best move next to the board-control grade, and the chart adds a dashed engine-evaluation line. Insights → All games can check your library ten games at a time.
+- **Insights → All games** is filterable by colour and time control: headline numbers; *Are you improving?* (board share at move 12 per game with a rolling average); *Where your games slip* (average board share by move in wins and losses); *Your openings* (grouped by the first two moves, tap to see those games); a *principles scorecard* comparing recent and earlier games; *which pieces cost you board*; and the with/without habit comparison.
+
 ## Run it
 
 There is no build step and nothing to install. Serve the folder over HTTP (ES modules don't load from `file://`):
