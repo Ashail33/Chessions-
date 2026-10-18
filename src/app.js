@@ -5,6 +5,8 @@ import { splitPgn, fetchLichess, fetchChessCom } from './import.js';
 import { Board } from './board.js';
 import { renderChart } from './chart.js';
 import { SAMPLES } from './samples.js';
+import { Engine, formatScore, uciToMove } from './engine.js';
+import { PlaySession, LEVELS, PUNISH, sideName } from './play.js';
 
 const WINDOW = 40; // plies with every alternative ranked
 const OPENING_MOVES = 12;
@@ -26,7 +28,11 @@ const state = {
   flipped: false,
   mode: 'review',
   quiz: null,
+  play: null,
+  playIndex: null, // null follows the live position
+  hint: null,
 };
+let engine = null;
 let nextId = 1;
 
 // ---------- analysis worker ----------
@@ -108,6 +114,7 @@ const currentGame = () => state.games[state.current] || null;
 function view() {
   const g = currentGame();
   if (state.mode === 'train' && state.quiz && state.quiz.position) return state.quiz.position;
+  if (state.mode === 'play' && state.play) return state.play.positions[playCursor()];
   if (state.variation) {
     const v = state.variation;
     return v.positions[v.cursor];
@@ -121,13 +128,22 @@ function view() {
   return { fen: pos.fen, analysis: pos.analysis, assessment: ply, move: ply };
 }
 
-const userColor = () => (currentGame() ? currentGame().userColor : 'w');
+const userColor = () => (state.mode === 'play' && state.play ? state.play.userColor : currentGame() ? currentGame().userColor : 'w');
+const playCursor = () => (state.playIndex === null ? state.play.positions.length - 1 : state.playIndex);
+const playLive = () => state.mode === 'play' && state.play && state.playIndex === null;
+const canMoveInPlay = () => playLive() && !state.play.thinking && !state.play.over && !state.play.resigned && state.play.chess.turn() === state.play.userColor;
 
 // ---------- board ----------
 const board = new Board($('board'), { onMove: handleBoardMove });
 
 function handleBoardMove(m) {
   if (state.mode === 'train') return answerQuiz(m);
+  if (state.mode === 'play') {
+    if (!canMoveInPlay()) return;
+    state.hint = null;
+    state.play.userMove(m);
+    return;
+  }
   const v = view();
   const g = currentGame();
   // Playing the game's own next move just steps forward.
@@ -157,6 +173,14 @@ function playMove(v, m) {
 
 function go(index) {
   const g = currentGame();
+  if (state.mode === 'play' && state.play) {
+    const last = state.play.positions.length - 1;
+    const i = Math.max(0, Math.min(last, index));
+    state.playIndex = i === last ? null : i;
+    board.clearSelection();
+    render();
+    return;
+  }
   if (state.variation) {
     const v = state.variation;
     if (index < 0) { exitVariation(); return; }
@@ -195,7 +219,12 @@ function render() {
   const a = v.analysis;
   const arrows = [];
   const training = state.mode === 'train';
-  if (!training && state.showBest) {
+  const playing = state.mode === 'play' && state.play;
+  if (playing && state.hint && playLive()) {
+    if (state.hint.dom) arrows.push({ ...state.hint.dom, kind: 'dom' });
+    if (state.hint.engine) arrows.push({ ...state.hint.engine, kind: 'best' });
+  }
+  if (!training && !playing && state.showBest) {
     const next = !state.variation && g && g.game ? g.game.plies[state.index] : null;
     if (next && next.best) {
       arrows.push({ from: next.best.from, to: next.best.to, kind: 'best' });
@@ -214,7 +243,7 @@ function render() {
     impact: v.assessment ? v.assessment.deltas : null,
     lastMove: v.move ? { from: v.move.from, to: v.move.to } : null,
     arrows,
-    legal: training && state.quiz && state.quiz.answer ? null : chess.moves({ verbose: true }),
+    legal: playing ? (canMoveInPlay() ? chess.moves({ verbose: true }) : null) : training && state.quiz && state.quiz.answer ? null : chess.moves({ verbose: true }),
   });
 
   const share = dominanceShare(a.dominance);
@@ -226,7 +255,8 @@ function render() {
     b.setAttribute('role', 'radio');
     b.setAttribute('aria-checked', String(b.dataset.overlay === state.overlay));
   });
-  $('legend').innerHTML = LEGENDS[state.overlay](freedomSide) + (arrows.length && !training ? ' Arrows show the next move: green is the most dominating option, grey is what was played.' : '');
+  const arrowNote = playing ? (arrows.length ? ' Green arrow: the engine\u2019s best move. Indigo arrow: the most dominating move.' : '') : arrows.length && !training ? ' Arrows show the next move: green is the most dominating option, grey is what was played.' : '';
+  $('legend').innerHTML = LEGENDS[state.overlay](freedomSide) + arrowNote;
   $('freedom-side').value = state.freedom;
   $('show-best').checked = state.showBest;
   $('as-color').value = me;
@@ -234,10 +264,13 @@ function render() {
   renderTitle();
   renderNav();
   renderMetrics(a);
-  if (training) renderQuizCoach(); else renderCoach(v);
+  if (training) renderQuizCoach(); else if (playing) renderPlayCoach(v); else renderCoach(v);
+  renderPlayControls();
   renderMoves();
   renderGraph();
-  $('variation').hidden = !state.variation;
+  $('variation').hidden = !state.variation || !!playing;
+  $('as-color-wrap').hidden = !!playing || training;
+  $('show-best-wrap').hidden = !!playing || training;
   if (state.variation) $('variation-moves').textContent = state.variation.positions.slice(1, state.variation.cursor + 1).map((p) => p.move.san).join(' ');
 }
 
@@ -245,6 +278,11 @@ function renderTitle() {
   const g = currentGame();
   if (state.mode === 'train') {
     $('game-title').innerHTML = '<strong>Trainer</strong><small>Positions from your games where a more dominating move was available</small>';
+    return;
+  }
+  if (state.mode === 'play' && state.play) {
+    const s = state.play;
+    $('game-title').innerHTML = `<strong>You vs Stockfish</strong><small>${s.level.text} \u00b7 ${esc(s.punish.text)} \u00b7 you play ${sideName(s.userColor)}</small>`;
     return;
   }
   if (!g) { $('game-title').innerHTML = '<strong>No game loaded</strong>'; return; }
@@ -258,7 +296,10 @@ function renderNav() {
   const g = currentGame();
   let label = 'Start';
   if (state.mode === 'train') label = state.quiz && state.quiz.items.length ? `Position ${state.quiz.i + 1}/${state.quiz.items.length}` : 'Trainer';
-  else if (v) label = `Line, move ${v.cursor}`;
+  else if (state.mode === 'play' && state.play) {
+    const pos = state.play.positions[playCursor()];
+    label = pos.move ? `${pos.move.fullmove}${pos.move.color === 'w' ? '.' : '\u2026'} ${pos.move.san}` : 'Start';
+  } else if (v) label = `Line, move ${v.cursor}`;
   else if (g && g.game && state.index > 0) {
     const p = g.game.plies[state.index - 1];
     label = `${p.fullmove}${p.color === 'w' ? '.' : '…'} ${p.san}`;
@@ -349,13 +390,17 @@ function tryAlternative(alt) {
 function renderMoves() {
   const g = currentGame();
   const el = $('moves');
-  if (!g || !g.game) { el.innerHTML = '<li class="empty" style="grid-column:1/-1">No moves yet.</li>'; return; }
+  const playing = state.mode === 'play' && state.play;
+  const plies = playing
+    ? state.play.positions.slice(1).map((p) => ({ ...p.move, dot: p.move.punished ? 'punish' : p.engine ? p.engine.grade.tone : null }))
+    : g && g.game ? g.game.plies.map((p) => ({ ...p, dot: p.label })) : [];
+  if (!plies.length) { el.innerHTML = '<li class="empty" style="grid-column:1/-1">No moves yet.</li>'; return; }
+  const current = playing ? playCursor() : state.variation ? -1 : state.index;
   let html = '';
-  g.game.plies.forEach((p, i) => {
+  plies.forEach((p, i) => {
     if (p.color === 'w' || i === 0) html += `<span class="num">${p.fullmove}.</span>`;
     if (i === 0 && p.color === 'b') html += '<span></span>';
-    const cur = !state.variation && state.index === i + 1;
-    html += `<button type="button" data-ply="${i + 1}" aria-current="${cur}">${p.label ? `<span class="dot ${p.label}"></span>` : ''}${esc(p.san)}</button>`;
+    html += `<button type="button" data-ply="${i + 1}" aria-current="${current === i + 1}">${p.dot ? `<span class="dot ${p.dot}"></span>` : ''}${esc(p.san)}</button>`;
   });
   el.innerHTML = html;
   el.querySelectorAll('[data-ply]').forEach((b) => { b.onclick = () => { state.variation = null; go(Number(b.dataset.ply)); }; });
@@ -370,6 +415,18 @@ function renderMoves() {
 function renderGraph() {
   const g = currentGame();
   const el = $('chart');
+  if (state.mode === 'play' && state.play) {
+    const s = state.play;
+    const sign = s.userColor === 'w' ? 1 : -1;
+    renderChart(el, {
+      values: s.positions.map((p) => sign * p.analysis.dominance),
+      marks: s.positions.slice(1).filter((p) => p.move.color === s.userColor && p.move.label).map((p, _, all) => ({ index: s.positions.indexOf(p), label: p.move.label })),
+      current: playCursor(),
+      openingPlies: OPENING_MOVES * 2,
+      onSelect: (i) => go(i),
+    });
+    return;
+  }
   if (!g || !g.game) { el.innerHTML = '<p class="empty">The chart appears once a game is analysed.</p>'; return; }
   const sign = g.userColor === 'w' ? 1 : -1;
   const values = g.game.positions.map((p) => sign * p.analysis.dominance);
@@ -588,6 +645,166 @@ function renderQuizCoach() {
   $('quiz-stop').onclick = stopQuiz;
 }
 
+// ---------- play the computer ----------
+function setPlayStatus(text, error = false) {
+  const el = $('play-status');
+  el.textContent = text;
+  el.classList.toggle('error', error);
+}
+
+async function startPlay() {
+  if (!engine) engine = new Engine();
+  const pick = $('play-color').value;
+  const color = pick === 'r' ? (Math.random() < 0.5 ? 'w' : 'b') : pick;
+  if (state.play) state.play.token++;
+  store.set('play', { color: pick, level: $('play-level').value, punish: $('play-punish').value });
+  state.play = new PlaySession(engine, {
+    userColor: color,
+    level: $('play-level').value,
+    punish: $('play-punish').value,
+    onUpdate: () => { if (state.mode === 'play') render(); },
+  });
+  state.mode = 'play';
+  state.playIndex = null;
+  state.hint = null;
+  state.variation = null;
+  state.flipped = false;
+  board.clearSelection();
+  setPlayStatus('Loading Stockfish…');
+  render();
+  $('board').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  try {
+    await engine.ready;
+    setPlayStatus('');
+  } catch (err) {
+    engine = null;
+    setPlayStatus(`Stockfish couldn’t start in this browser (${err.message}). Try another browser, or run the app from the repo.`, true);
+    return;
+  }
+  state.play.start();
+}
+
+function resumePlay() {
+  state.mode = 'play';
+  state.variation = null;
+  board.clearSelection();
+  render();
+}
+
+function showHint() {
+  const s = state.play;
+  if (!canMoveInPlay()) return;
+  const fen = s.chess.fen();
+  const dom = rankMoves(new Chess(fen))[0];
+  const eng = s.userEval && s.userEval.fen === fen && s.userEval.bestmove ? uciToMove(s.userEval.bestmove) : null;
+  const engSan = eng ? new Chess(fen).move(eng).san : null;
+  state.hint = { dom: dom ? { from: dom.from, to: dom.to, san: dom.san } : null, engine: eng ? { from: eng.from, to: eng.to, san: engSan } : null };
+  render();
+}
+
+function savePlayedGame() {
+  const s = state.play;
+  if (!s || s.positions.length < 2) return;
+  const first = state.games.length;
+  addGames([s.pgn()], { userColor: s.userColor }).then(() => {
+    selectGame(first);
+    document.querySelector('#lower-tabs [data-tab="report"]').click();
+  });
+}
+
+function renderPlayControls() {
+  const s = state.play;
+  const active = state.mode === 'play' && s && !s.over && !s.resigned;
+  $('play-hint').hidden = !active;
+  $('play-undo').hidden = !active;
+  $('play-resign').hidden = !active;
+  $('play-hint').disabled = !canMoveInPlay();
+  $('play-undo').disabled = !s || s.thinking || s.positions.length < 2;
+  $('play-start').textContent = s ? 'New game' : 'Start game';
+  const resume = s && state.mode !== 'play' && !s.over && !s.resigned;
+  const st = $('play-status');
+  if (resume && !st.querySelector('button')) {
+    st.classList.remove('error');
+    st.innerHTML = 'Your game is paused. <button type="button" class="link" id="play-resume">Back to the game</button>';
+    $('play-resume').onclick = resumePlay;
+  } else if (!resume && st.querySelector('#play-resume')) {
+    st.textContent = '';
+  }
+}
+
+const evalText = (cp) => `${formatScore(cp)} for you`;
+
+function renderPlayCoach(v) {
+  const s = state.play;
+  const el = $('coach');
+  const idx = playCursor();
+  let userIdx = -1;
+  for (let i = idx; i > 0; i--) if (s.positions[i].move.color === s.userColor) { userIdx = i; break; }
+  const userPos = userIdx > 0 ? s.positions[userIdx] : null;
+  const replyPos = userIdx > 0 && userIdx + 1 <= idx ? s.positions[userIdx + 1] : null;
+  const live = playLive();
+
+  let status = '';
+  if (s.error) status = `<p class="status error">${esc(s.error)}</p>`;
+  else if (s.resigned || s.over) {
+    const r = s.resigned ? 'loss' : s.result();
+    const text = s.resigned ? 'You resigned.' : r === 'win' ? 'Checkmate. You beat Stockfish!' : r === 'loss' ? 'Checkmate. Stockfish wins this one.' : 'Draw.';
+    status = `<div class="callout ${r === 'win' ? 'win' : ''}"><b>${text}</b><span>Add the game to your games to get the full report, your patterns, and trainer positions from the moves you missed.</span><div class="row" style="justify-content:flex-start"><button type="button" class="btn primary" id="play-save">Analyse this game</button></div></div>`;
+  } else if (!live) status = '<span class="eyebrow">Looking back</span>';
+  else if (s.thinking) status = `<span class="thinking">${s.chess.turn() === s.userColor ? 'Checking the position…' : 'Stockfish is thinking…'}</span>`;
+  else status = `<span class="eyebrow">Your move${s.userEval ? ` · <span class="eval">${evalText(s.userEval.score)}</span>` : ''}</span>`;
+
+  let body = '';
+  if (!userPos) {
+    body = `<h2>${s.positions.length > 1 ? 'Stockfish opened' : 'New game'}</h2>
+      <p>Stockfish plays at <b>${s.level.text}</b> level while you play well. ${s.punish.key === 'always' ? 'This game it always plays at full strength.' : `When a move costs you ${s.punish.threshold >= 100 ? 'a pawn' : 'half a pawn'} or more, it switches to full strength and goes after it.`}</p>
+      <p class="delta">After every move you’ll see the engine’s verdict, how it changed your board dominance, and, when you slip, the line Stockfish uses to punish it.</p>`;
+  } else {
+    const u = userPos.move;
+    const e = userPos.engine;
+    const pills = `${e ? `<span class="pill ${e.grade.tone}">${e.grade.text}</span>` : ''}`;
+    let engineLine = '<p class="delta">Engine verdict pending…</p>';
+    if (e) {
+      engineLine = `<p>Evaluation for you: <b class="eval">${formatScore(e.evalBefore)}</b> → <b class="eval">${formatScore(e.evalAfter)}</b>${e.loss >= 20 ? ` (lost ${(e.loss / 100).toFixed(1)} pawn${e.loss >= 150 ? 's' : ''})` : ''}.${e.better && e.loss > 50 ? ` Better was <b class="mono">${esc(e.better)}</b>.` : ''}</p>`;
+    }
+    const dom = u.label ? `<p class="delta">Board dominance: <b>${LABELS[u.label].text}</b> (#${u.rank} of ${u.total}). ${describeDeltas(u.deltas)}</p>` : '';
+    let reply = '';
+    if (replyPos) {
+      const r = replyPos.move;
+      if (r.punished && e && e.loss >= Math.max(50, s.punish.threshold)) {
+        reply = `<div class="callout punish"><b>Punished.</b><span>Stockfish switched to full strength and played <b class="mono">${esc(r.san)}</b>. The line it sees: <span class="mono">${esc(e.threat.join(' '))}</span></span></div>`;
+      } else {
+        reply = `<p class="delta">Stockfish replied <b class="mono">${esc(r.san)}</b>${r.punished ? ' at full strength' : ` at ${s.level.text} level`}.</p>`;
+      }
+    }
+    body = `<h2><span class="mono">${esc(u.san)}</span>${pills}</h2>${engineLine}${dom}${tagList(u.tags)}${reply}`;
+  }
+
+  let hint = '';
+  if (state.hint && live) {
+    const h = state.hint;
+    hint = `<div class="callout"><b>Hint</b><span>${h.engine ? `Engine’s choice: <b class="mono">${esc(h.engine.san)}</b> (green arrow). ` : ''}${h.dom ? `Most dominating: <b class="mono">${esc(h.dom.san)}</b> (indigo arrow).` : ''}</span></div>`;
+  }
+
+  el.innerHTML = `<div class="coach-card">${status}${body}${hint}</div>`;
+  const save = $('play-save');
+  if (save) save.onclick = savePlayedGame;
+}
+
+function initPlaySetup() {
+  const saved = store.get('play', {});
+  $('play-level').innerHTML = LEVELS.map((l) => `<option value="${l.key}">${l.text}${l.elo ? ` (~${l.elo})` : ''}</option>`).join('');
+  $('play-punish').innerHTML = PUNISH.map((p) => `<option value="${p.key}">${p.text}</option>`).join('');
+  $('play-color').value = saved.color || 'w';
+  $('play-level').value = saved.level || 'club';
+  $('play-punish').value = saved.punish || 'mistakes';
+  $('play-start').addEventListener('click', startPlay);
+  $('play-hint').addEventListener('click', showHint);
+  $('play-undo').addEventListener('click', () => { state.hint = null; state.playIndex = null; if (state.play.takeBack()) render(); });
+  $('play-resign').addEventListener('click', () => state.play.resign());
+}
+initPlaySetup();
+
 // ---------- wiring ----------
 function bindTabs(container, onChange) {
   const tabs = container.querySelectorAll('[role="tab"]');
@@ -687,13 +904,13 @@ $('show-best').addEventListener('change', () => { state.showBest = $('show-best'
 $('flip').addEventListener('click', () => { state.flipped = !state.flipped; render(); });
 $('variation-exit').addEventListener('click', exitVariation);
 
-const cursor = () => (state.variation ? state.variation.cursor : state.index);
+const cursor = () => (state.mode === 'play' && state.play ? playCursor() : state.variation ? state.variation.cursor : state.index);
 $('nav-start').addEventListener('click', () => { if (state.variation) exitVariation(); go(0); });
 $('nav-prev').addEventListener('click', () => go(cursor() - 1));
 $('nav-next').addEventListener('click', () => go(cursor() + 1));
 $('nav-end').addEventListener('click', () => go(1e9));
 document.addEventListener('keydown', (e) => {
-  if (e.target.closest('input, textarea, select') || state.mode === 'train') return;
+  if (e.target.closest('input, textarea, select, button') || state.mode === 'train') return;
   if (e.key === 'ArrowLeft') { e.preventDefault(); go(cursor() - 1); }
   if (e.key === 'ArrowRight') { e.preventDefault(); go(cursor() + 1); }
   if (e.key === 'Home') { e.preventDefault(); go(0); }

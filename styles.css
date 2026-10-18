@@ -99,6 +99,24 @@ input[type="number"] { width: 64px; }
 .tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
 .tabs.small button { padding: 6px 8px; font-size: 13px; }
 
+.play-setup { display: grid; gap: 10px; }
+.play-fields { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.play-fields label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
+.play-fields .wide { grid-column: 1 / -1; }
+.play-fields select { width: 100%; min-width: 0; }
+.play-actions { justify-content: flex-start; gap: 6px; }
+.sep { border: 0; border-top: 1px solid var(--line); margin: 2px 0; width: 100%; }
+.callout { border-radius: 8px; padding: 10px 12px; display: grid; gap: 4px; font-size: 13px; background: var(--sunk); }
+.callout.punish { background: color-mix(in srgb, var(--bad) 14%, var(--surface)); border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent); }
+.callout.punish b { color: var(--bad); }
+.callout.win { background: color-mix(in srgb, var(--ok) 14%, var(--surface)); }
+.thinking { display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
+.thinking::before { content: ''; width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--accent); border-right-color: transparent; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.eval { font: 600 13px var(--font-mono); }
+.dot.punish { background: var(--bad); box-shadow: 0 0 0 2px color-mix(in srgb, var(--bad) 35%, transparent); }
+.arrow.dom line { stroke: rgba(72, 76, 214, 0.8); }
+.arrow.dom polygon { fill: rgba(72, 76, 214, 0.8); }
 .import { display: grid; gap: 10px; }
 .import > div { display: grid; gap: 6px; }
 .status { margin: 0; font-size: 13px; color: var(--muted); min-height: 1.2em; }

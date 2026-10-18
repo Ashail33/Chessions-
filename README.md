@@ -15,6 +15,13 @@ Inspired by the heatmap layers on [chessyi.com/visualization](https://www.chessy
 
 ## Features
 
+- **Play the computer.** Stockfish 17.1 runs in your browser at the level you pick (Beginner ~1350 up to full strength). While you play well it stays at that level. When a move costs you a pawn or more (or half a pawn, if you choose), it switches to full strength and goes after the mistake. After every move you see:
+  - the engine's verdict (Best / Good / Inaccuracy / Mistake / Blunder), how much the evaluation dropped, and the better move;
+  - what the move did to your board dominance, plus the principle tags;
+  - when you've been punished, the line Stockfish is using against you.
+
+  Use **Hint** for the engine's choice and the most dominating move, **Take back** to retry, and **Analyse this game** to send a finished game to the report, patterns and trainer.
+
 - **Import** games by pasting PGN, or fetch recent games from **Lichess** or **Chess.com** by username.
 - **Board overlays**:
   - *Control* heatmap: amber for White, indigo for Black, striped where contested.
@@ -61,7 +68,7 @@ npm test
 
 Candidate moves are scored by material (10 per pawn) plus dominance. Material left en prise is subtracted using a static exchange evaluation, and a bonus is added for threats (a double threat counts much more).
 
-**Limits:** this is a positional lens, not an engine. It looks one move ahead with an exchange check, so it misjudges sacrifices and deep tactics (it will grade Morphy's brilliant sacrifices as concessions). Use it to train your feel for space and freedom, and an engine to check tactics.
+**Limits:** the dominance score is a positional lens, not an engine. It looks one move ahead with an exchange check, so it misjudges sacrifices and deep tactics (it will grade Morphy's brilliant sacrifices as concessions). Use it to train your feel for space and freedom. The Stockfish opponent in Play mode is what keeps you honest about tactics.
 
 ## Layout
 
@@ -72,5 +79,10 @@ src/insights.js          move assessment, principle tags, game reports, cross-ga
 src/board.js, chart.js   board with overlays and arrows; dominance chart
 src/import.js            PGN splitting, Lichess and Chess.com fetchers
 src/worker.js            analyses games off the main thread
+src/engine.js            UCI wrapper around Stockfish in a Web Worker (WASM, with a pure-JS fallback)
+src/play.js              games against Stockfish: adaptive strength and punishing mistakes
 vendor/chess.js          chess.js 1.4.0 (BSD-2-Clause) for move legality and PGN parsing
+vendor/stockfish/        Stockfish.js 17.1 lite single-threaded build (GPLv3, see COPYING.txt)
 ```
+
+Stockfish is free software under the GNU GPL v3. Its source is at https://github.com/official-stockfish/Stockfish and https://github.com/nmrugg/stockfish.js. If you distribute this app, the GPL applies to the combined work.

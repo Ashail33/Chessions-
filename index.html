@@ -25,6 +25,29 @@
 
 <main class="layout">
   <aside class="panel games" aria-label="Games">
+    <section class="play-setup" aria-label="Play the computer">
+      <span class="eyebrow">Play the computer</span>
+      <div class="play-fields" id="play-fields">
+        <label for="play-color">You play
+          <select id="play-color"><option value="w">White</option><option value="b">Black</option><option value="r">Random</option></select>
+        </label>
+        <label for="play-level">Opponent
+          <select id="play-level"></select>
+        </label>
+        <label for="play-punish">When you slip
+          <select id="play-punish"></select>
+        </label>
+      </div>
+      <div class="row play-actions">
+        <button type="button" class="btn primary" id="play-start">Start game</button>
+        <button type="button" class="btn" id="play-hint" hidden>Hint</button>
+        <button type="button" class="btn" id="play-undo" hidden>Take back</button>
+        <button type="button" class="btn" id="play-resign" hidden>Resign</button>
+      </div>
+      <p class="status" id="play-status" role="status"></p>
+    </section>
+    <hr class="sep">
+    <span class="eyebrow">Analyse your games</span>
     <div class="tabs small" role="tablist" id="import-tabs">
       <button type="button" role="tab" data-tab="pgn" aria-selected="true">Paste PGN</button>
       <button type="button" role="tab" data-tab="lichess" aria-selected="false">Lichess</button>
@@ -54,7 +77,7 @@
   <section class="stage" aria-label="Board">
     <div class="game-title">
       <div id="game-title"><strong>No game loaded</strong></div>
-      <label class="inline" for="as-color">Analyse as
+      <label class="inline" for="as-color" id="as-color-wrap">Analyse as
         <select id="as-color"><option value="w">White</option><option value="b">Black</option></select>
       </label>
     </div>
@@ -84,7 +107,7 @@
         <label class="inline" for="freedom-side">Freedom of
           <select id="freedom-side"><option value="opp">my opponent</option><option value="me">my pieces</option></select>
         </label>
-        <label class="inline check" for="show-best"><input type="checkbox" id="show-best" checked> Show most dominating move</label>
+        <label class="inline check" for="show-best" id="show-best-wrap"><input type="checkbox" id="show-best" checked> Show most dominating move</label>
       </div>
       <p class="legend" id="legend"></p>
     </div>
