@@ -15,6 +15,8 @@ Inspired by the heatmap layers on [chessyi.com/visualization](https://www.chessy
 
 ## Features
 
+The app has four screens, switched from the tab bar: **Play** (Stockfish), **Review** (step through a game with the coach), **Insights** (this game's report, or habits across all your games) and **Train** (find the dominating move in positions from your games). Imports and your games list open from the game picker at the top of Review, and settings from the gear icon.
+
 - **Play the computer.** Stockfish 17.1 runs in your browser at the level you pick (Beginner ~1350 up to full strength). While you play well it stays at that level. When a move costs you a pawn or more (or half a pawn, if you choose), it switches to full strength and goes after the mistake. After every move you see:
   - the engine's verdict (Best / Good / Inaccuracy / Mistake / Blunder), how much the evaluation dropped, and the better move;
   - what the move did to your board dominance, plus the principle tags;
