@@ -14,14 +14,14 @@ export const TAGS = {
   restricts: { text: 'Restricts', tone: 'good', lesson: 'Took away several safe squares from the opponent’s pieces. Fewer safe moves means fewer good plans for them.' },
   activates: { text: 'Activates', tone: 'good', lesson: 'Your pieces gained several safe squares. Freedom compounds: active pieces create threats.' },
   threat: { text: 'Creates threat', tone: 'good', lesson: 'Attacks something, so the opponent must spend a move responding instead of improving their position.' },
-  captures: { text: 'Captures', tone: 'neutral', lesson: 'A capture changes material and often opens lines — check who benefits from the open lines.' },
+  captures: { text: 'Captures', tone: 'neutral', lesson: 'A capture changes material and often opens lines. Check who benefits from the open lines.' },
   'flank-pawn': { text: 'Flank pawn', tone: 'warn', lesson: 'An edge pawn moved early. It barely touches the center and doesn’t develop anything, so the opponent gets a free move to grab space.' },
   'repeat-piece': { text: 'Moves piece again', tone: 'warn', lesson: 'The same piece moved twice while others still sit at home. Each repeat is a move your other pieces didn’t get.' },
   'early-queen': { text: 'Early queen', tone: 'warn', lesson: 'The queen came out before the minor pieces. She is easy to attack with smaller pieces, which gains the opponent free developing moves.' },
   'rim-knight': { text: 'Knight on rim', tone: 'warn', lesson: 'A knight on the edge reaches half as many squares as one in the center. Count its safe moves on the board.' },
-  'blocks-bishop': { text: 'Blocks own bishop', tone: 'warn', lesson: 'This move shut in one of your own bishops — it lost several safe squares.' },
+  'blocks-bishop': { text: 'Blocks own bishop', tone: 'warn', lesson: 'This move shut in one of your own bishops. It lost several safe squares.' },
   'king-walk': { text: 'Gives up castling', tone: 'warn', lesson: 'The king lost the right to castle without castling. It will be stuck in the center where lines open first.' },
-  hangs: { text: 'Leaves material en prise', tone: 'bad', lesson: 'After this move a piece can be won. Dominance means nothing if material is dropped — check what is attacked before moving.' },
+  hangs: { text: 'Leaves material en prise', tone: 'bad', lesson: 'After this move a piece can be won. Board control doesn’t make up for dropped material. Check what is attacked before you move.' },
 };
 
 const HOME = new Set(['b1', 'g1', 'c1', 'f1', 'b8', 'g8', 'c8', 'f8']);
