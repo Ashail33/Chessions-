@@ -124,10 +124,13 @@ export class CaptureSession {
   }
 
   // Orient the board and learn its colours from the starting position.
-  calibrate() {
+  // orient: work out which corner is which from the pieces (taps can come in
+  // any order); false keeps the corners as given.
+  calibrate({ orient = true } = {}) {
     const { img, scale } = this.frame();
     try {
-      const { corners } = orientCorners(img, this.corners.map(([x, y]) => [x * scale, y * scale]));
+      const given = this.corners.map(([x, y]) => [x * scale, y * scale]);
+      const { corners } = orient ? orientCorners(img, given) : { corners: given };
       this.corners = corners.map(([x, y]) => [x / scale, y / scale]);
       this.H = boardHomography(this.corners);
       this.tracker = new GridTracker(img, corners);
@@ -153,6 +156,15 @@ export class CaptureSession {
     // Keep reading while you check the setup, so fixes show straight away.
     this.stopLoop();
     this.timer = setInterval(() => this.tick(), 200);
+  }
+
+  // Half a turn, for when the app guessed White's side wrong.
+  turnBoard() {
+    if (!this.corners || this.corners.length !== 4) return;
+    this.corners = [2, 3, 0, 1].map((i) => this.corners[i]);
+    this.calibrate({ orient: false });
+    this.draw();
+    this.onChange();
   }
 
   updateCheck() {
@@ -211,7 +223,10 @@ export class CaptureSession {
   search() {
     if (this.corners.length || !this.video.videoWidth) return;
     const { img, scale } = this.frame();
-    const found = detectBoard(img);
+    const info = {};
+    const found = detectBoard(img, info);
+    const seeing = info.lattice >= 12;
+    if (seeing !== this.seeing) { this.seeing = seeing; this.onChange(); }
     if (!found) {
       if (this.candidate) { this.candidate = null; this.draw(); this.onChange(); }
       return;
@@ -226,7 +241,7 @@ export class CaptureSession {
     if (this.agreeing >= 2 && performance.now() - (this.openedAt || 0) > 1500) {
       this.searching = false;
       this.corners = corners;
-      this.calibrate();
+      this.calibrate({ orient: found.byPieces });
       this.status = '';
     }
     this.draw();

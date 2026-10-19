@@ -1,13 +1,14 @@
-// Finds the board in a frame without any taps, using what we know: it is a
-// checkerboard, and the pieces are in their starting squares.
+// Finds the board in a frame without any taps.
 //
 // 1. Grid crossings (where four squares meet in an X) are found with the
 //    ChESS corner response (Bennett & Lasenby, 2014).
 // 2. Starting from strong crossings, neighbours are joined into a lattice.
-// 3. The lattice covers the empty middle of the board; every placement of
-//    the full 8x8 board around it is tried, and the pieces pick the right
-//    one (two full ranks at each end, White's lighter).
-// 4. The grid is refined on every crossing that can be found.
+// 3. Every placement of the full 8x8 board around the lattice is tried; the
+//    board's edge picks the right one (inside it the squares alternate light
+//    and dark, just outside they don't), so no pieces are needed.
+// 4. Which corner is a1: the pieces if they're in their starting squares,
+//    otherwise the dark corner nearest the camera.
+// 5. The grid is refined on every crossing that can be found.
 
 import { orientCorners, boardHomography, fitHomography, project, toGray } from './vision.js';
 
@@ -155,11 +156,15 @@ function refine(H, pts) {
   return src.length >= 12 ? fitHomography(src, dst) : H;
 }
 
-// Find the board. img: RGBA frame. Returns { corners (a8, h8, h1, a1), separation, crossings } or null.
-export function detectBoard(img) {
+// Find the board. img: RGBA frame. Returns { corners (a8, h8, h1, a1), byPieces,
+// crossings } or null. info, if given, is filled in with how far it got
+// ({ crossings, lattice }), for telling the user what to fix.
+export function detectBoard(img, info = {}) {
   const gray = toGray(img);
   const R = crossingResponse(gray);
   const pts = crossingPoints(gray, R);
+  info.crossings = pts.length;
+  info.lattice = 0;
   if (pts.length < 12) return null;
   // Grow from the strongest few seeds; keep the biggest consistent lattice.
   let best = null;
@@ -171,6 +176,7 @@ export function detectBoard(img) {
     if (best && best.nodes.length >= 30) break;
   }
   if (!best) return null;
+  info.lattice = best.nodes.length;
   // Real crossings are all inside the board (lines 1 to 7): if the lattice is
   // wider, its outermost row or column with fewer points is spurious.
   let nodes = best.nodes;
@@ -191,25 +197,143 @@ export function detectBoard(img) {
   const [i0, i1] = span('i');
   const [j0, j1] = span('j');
   if (i1 - i0 > 6 || j1 - j0 > 6) return null;
-  // Try every placement of the 8x8 board around the lattice; the pieces decide.
+  // Try every placement of the 8x8 board around the lattice. The board's own
+  // edge decides: inside it the squares alternate light and dark, just
+  // outside they don't. This needs no pieces in any particular place.
+  const lum = squareLum(gray, best.H);
   const hyps = [];
   for (let oi = 1; oi + (i1 - i0) <= 7; oi++) {
     for (let oj = 1; oj + (j1 - j0) <= 7; oj++) {
-      // board corner (bx, by) -> lattice (bx - oi + i0, by - oj + j0)
-      const quad = [[0, 0], [8, 0], [8, 8], [0, 8]].map(([bx, by]) => project(best.H, bx - oi + i0, by - oj + j0));
-      if (quad.some(([x, y]) => x < -4 || y < -4 || x > img.width + 4 || y > img.height + 4)) continue;
-      try {
-        const o = orientCorners(img, quad);
-        hyps.push(o);
-      } catch { /* degenerate */ }
+      const toLat = (bx, by) => [bx - oi + i0, by - oj + j0];
+      const quad = [[0, 0], [8, 0], [8, 8], [0, 8]].map(([bx, by]) => project(best.H, ...toLat(bx, by)));
+      if (quad.some(([x, y]) => x < -0.15 * img.width || y < -0.15 * img.height || x > 1.15 * img.width || y > 1.15 * img.height)) continue;
+      // The edge always counts; pieces in their starting squares count too.
+      const edge = edgeScore(lum, i0 - oi, j0 - oj);
+      let pieces = null;
+      try { pieces = orientCorners(img, quad); } catch { /* degenerate */ }
+      const sep = pieces ? Math.max(0, pieces.separation) : 0;
+      hyps.push({ oi, oj, quad, edge, sep, pieces, score: edge + sep });
     }
   }
   if (!hyps.length) return null;
-  hyps.sort((a, b) => b.separation - a.separation);
+  hyps.sort((a, b) => b.score - a.score);
   const top = hyps[0];
-  const margin = hyps[1] ? top.separation - hyps[1].separation : top.separation;
-  if (top.separation < 1.2 || margin < 0.25) return null;
-  const H = refine(boardHomography(top.corners), pts);
-  const corners = [[0, 0], [8, 0], [8, 8], [0, 8]].map(([x, y]) => project(H, x, y));
-  return { corners, separation: top.separation, margin, crossings: best.nodes.length };
+  const margin = hyps[1] ? top.score - hyps[1].score : top.score;
+  if (top.score < 0.6 || margin < 0.3) return null;
+  // Which corner is a1: from the pieces if they're set up, else a1 is the dark
+  // corner nearest the camera.
+  // The pieces only count if they agree with the squares (a1 is dark), so
+  // shading on an empty board can't pass for pieces.
+  const oriented = top.pieces;
+  const colour = orientByColour(top.quad, gray);
+  let corners = colour.corners;
+  let byPieces = false;
+  if (oriented && oriented.separation >= 1.2 && colour.parityOk(oriented.corners)) {
+    corners = oriented.corners;
+    byPieces = true;
+  }
+  const H = refine(boardHomography(corners), pts);
+  return {
+    corners: [[0, 0], [8, 0], [8, 8], [0, 8]].map(([x, y]) => project(H, x, y)),
+    byPieces,
+    score: top.score,
+    margin,
+    crossings: best.nodes.length,
+  };
+}
+
+// Colour of each lattice cell, read near its four corners (pieces stand in the
+// middle, so the corners show the square). lum.get(i, j) is the cell whose
+// top-left crossing is lattice (i, j); null when out of view.
+function squareLum(gray, H) {
+  const { g, width, height } = gray;
+  const cache = new Map();
+  const at = (u, v) => {
+    const [x, y] = project(H, u, v);
+    const px = Math.round(x);
+    const py = Math.round(y);
+    return px < 0 || py < 0 || px >= width || py >= height ? null : g[py * width + px];
+  };
+  return {
+    get(i, j) {
+      const k = `${i},${j}`;
+      if (cache.has(k)) return cache.get(k);
+      const vals = [];
+      for (const [a, b] of [[0.14, 0.14], [0.86, 0.14], [0.14, 0.86], [0.86, 0.86], [0.3, 0.14], [0.7, 0.86]]) {
+        const v = at(i + a, j + b);
+        if (v !== null) vals.push(v);
+      }
+      vals.sort((x, y) => x - y);
+      const out = vals.length >= 4 ? vals[Math.floor(vals.length / 2)] : null;
+      cache.set(k, out);
+      return out;
+    },
+  };
+}
+
+// How well a placement explains the board's edge. di, dj: lattice cell of board
+// square (0, 0) minus (0, 0), i.e. board file f is lattice cell f + di.
+function edgeScore(lum, di, dj) {
+  // Alternation along a row or column of cells: mean |difference| between neighbours.
+  const alt = (cells) => {
+    const v = cells.map(([i, j]) => lum.get(i, j));
+    let s = 0;
+    let n = 0;
+    for (let k = 1; k < v.length; k++) if (v[k] !== null && v[k - 1] !== null) { s += Math.abs(v[k] - v[k - 1]); n++; }
+    return n >= 4 ? s / n : null;
+  };
+  const line = (fixed, isRow) => Array.from({ length: 8 }, (_, k) => (isRow ? [k + di, fixed + dj] : [fixed + di, k + dj]));
+  // Contrast scale: alternation across the middle of the board.
+  const mid = [alt(line(3, true)), alt(line(4, true)), alt(line(3, false)), alt(line(4, false))].filter((x) => x !== null);
+  const scale = mid.length ? mid.reduce((a, b) => a + b, 0) / mid.length : 0;
+  if (scale < 4) return -Infinity;
+  let score = 0;
+  for (const [inside, outside, isRow] of [[0, -1, true], [7, 8, true], [0, -1, false], [7, 8, false]]) {
+    const a = alt(line(inside, isRow));
+    const b = alt(line(outside, isRow));
+    if (a === null) { score -= 0.5; continue; } // the board's own edge row out of view
+    score += (a - (b === null ? scale * 0.5 : b)) / scale;
+  }
+  return score / 4;
+}
+
+// Without pieces to go by: a1 is a dark square, and White usually sits nearest
+// the camera (the bottom of the picture).
+function orientByColour(quad, gray) {
+  const { g, width, height } = gray;
+  const c = quad.reduce((a, [x, y]) => [a[0] + x / 4, a[1] + y / 4], [0, 0]);
+  const ring = [...quad].sort((p, q) => Math.atan2(p[1] - c[1], p[0] - c[0]) - Math.atan2(q[1] - c[1], q[0] - c[0]));
+  // Colour of a corner square, read near its corners (clear of any piece).
+  const cell = (H, f, r) => {
+    const vals = [];
+    for (const [a, b] of [[0.14, 0.14], [0.86, 0.14], [0.14, 0.86], [0.86, 0.86]]) {
+      const [x, y] = project(H, f + a, r + b);
+      const px = Math.round(x);
+      const py = Math.round(y);
+      if (px >= 0 && py >= 0 && px < width && py < height) vals.push(g[py * width + px]);
+    }
+    return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : 0;
+  };
+  const options = [0, 1, 2, 3].map((k) => {
+    const corners = [0, 1, 2, 3].map((i) => ring[(i + k) % 4]); // a8, h8, h1, a1
+    const H = boardHomography(corners);
+    // Light squares are those with (file + row from the top) even, a8 first.
+    // Compare every square with its neighbours, so uneven light can't fool it.
+    const lum = [];
+    for (let r = 0; r < 8; r++) for (let f = 0; f < 8; f++) lum.push(cell(H, f, r));
+    let score = 0;
+    for (let r = 0; r < 8; r++) for (let f = 0; f < 8; f++) {
+      const nb = [[f - 1, r], [f + 1, r], [f, r - 1], [f, r + 1]].filter(([a, b]) => a >= 0 && b >= 0 && a < 8 && b < 8).map(([a, b]) => lum[b * 8 + a]);
+      const d = lum[r * 8 + f] - nb.reduce((x, y) => x + y, 0) / nb.length;
+      score += (f + r) % 2 === 0 ? d : -d;
+    }
+    return { corners, ok: score > 0, near: corners[2][1] + corners[3][1] };
+  });
+  const valid = options.filter((o) => o.ok);
+  const same = (a, b) => a.every(([x, y], i) => Math.hypot(x - b[i][0], y - b[i][1]) < 1e-6);
+  return {
+    corners: (valid.length ? valid : options).sort((a, b) => b.near - a.near)[0].corners,
+    // Does a corner order put a1 on a dark square?
+    parityOk: (corners) => valid.some((o) => same(o.corners, corners) || same(o.corners, [2, 3, 0, 1].map((i) => corners[i]))),
+  };
 }

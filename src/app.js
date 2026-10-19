@@ -767,7 +767,7 @@ function capturePanel() {
   if (c.step === 'corners') {
     const finding = c.searching && !c.corners.length;
     const head = finding
-      ? `<p class="v-line"><span class="thinking">${c.candidate ? 'Found the board, holding still' : 'Looking for the board'}</span></p>
+      ? `<p class="v-line"><span class="thinking">${c.candidate ? 'Found the board, hold still' : c.seeing ? 'Seeing the squares. Keep the whole board in view' : 'Looking for the board'}</span></p>
       <p class="small muted">Set up the pieces in the starting position and point the camera at the board, with all 64 squares in view. It finds the board by itself. If it doesn’t, tap the four corners.</p>`
       : `<p class="v-line">Tap the four corners of the board (${c.corners.length} of 4).</p>
       <p class="small muted">Any order is fine: the pieces show which side is White. Keep all 64 squares in view.</p>`;
@@ -779,14 +779,16 @@ function capturePanel() {
     const k = c.check || { ok: false, wrong: 0, separation: 0 };
     const note = k.ok
       ? '<p class="v-line"><b class="pos">All 32 pieces found.</b> White and black dots show what the camera reads on each square.</p>'
-      : k.wrong
+      : k.wrong > 12
+        ? '<p class="v-line"><b class="neg">Set up the starting position.</b> The board is found; recording starts from the starting position. If the pieces are set up and White is on the wrong side, tap Turn board.</p>'
+        : k.wrong
         ? `<p class="v-line"><b class="neg">${k.wrong} square${k.wrong === 1 ? ' reads' : 's read'} wrong</b> (ringed in red). Check the grid sits on the squares and every piece is on its starting square. This updates as you fix it; if the light changed, tap Re-learn colours.</p>`
         : '<p class="v-line"><b class="neg">The pieces are hard to tell from the squares.</b> More light, or a steeper angle from above, helps. You can still try.</p>';
     return `<article class="verdict tone-${k.ok ? 'dominant' : 'passive'}">${note}
       <div class="field"><span class="label">You are playing</span>${chipGroup('captureMe', [{ value: 'w', text: 'White' }, { value: 'b', text: 'Black' }, { value: 'none', text: 'Just recording' }], state.captureMe)}</div></article>
       <div class="chips rec-toggles">${camViewChip(c)}</div>
       <div id="cam-slot"></div>
-      <div class="action-bar"><button type="button" class="btn primary" data-action="captureStart">Start recording</button><button type="button" class="btn" data-action="captureRecheck">Re-learn colours</button><button type="button" class="btn" data-action="captureRedo">Find again</button></div>`;
+      <div class="action-bar"><button type="button" class="btn primary" data-action="captureStart">Start recording</button><button type="button" class="btn" data-action="captureRecheck">Re-learn colours</button><button type="button" class="btn" data-action="captureTurn">Turn board</button><button type="button" class="btn" data-action="captureRedo">Find again</button></div>`;
   }
   const hist = c.chess.history({ verbose: true });
   const plies = hist.map((m, i) => ({ san: m.san, color: m.color, fullmove: Math.floor(i / 2) + 1 }));
@@ -846,6 +848,7 @@ const CAPTURE_ACTIONS = {
   captureRedo: () => state.capture.redoCorners(),
   captureStart: () => state.capture.start(),
   captureRecheck: () => state.capture.recheck(),
+  captureTurn: () => state.capture.turnBoard(),
   captureLastCorners: () => state.capture.useLastCorners(),
   captureSpeak: () => state.capture.setSpeak(!state.capture.speak),
   captureCamera: () => state.capture.toggleCamera(),
