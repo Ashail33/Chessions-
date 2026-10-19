@@ -3,10 +3,12 @@
 // the moves it sees to the app.
 
 import { Chess } from '../vendor/chess.js';
-import { boardHomography, readFeatures, orientCorners, BoardReader, MoveWatcher, occupancy, squarePoint, project } from './vision.js';
+import { boardHomography, readFeatures, orientCorners, BoardReader, MoveWatcher, GridTracker, occupancy, squarePoint, project } from './vision.js';
 
 export const CORNER_ORDER = ['a8', 'h8', 'h1', 'a1'];
 const SAMPLE_WIDTH = 480;
+const RECT = 320; // board view size in pixels
+const RECT_MARGIN = 0.3; // squares of border shown around the board
 
 // Spoken form of a move, so you know it was recorded without looking.
 const PIECE_WORDS = { N: 'knight', B: 'bishop', R: 'rook', Q: 'queen', K: 'king' };
@@ -51,7 +53,16 @@ export class CaptureSession {
     this.video.muted = true;
     this.video.autoplay = true;
     this.overlay = document.createElement('canvas');
-    this.el.append(this.video, this.overlay);
+    // Straightened, centred view of the board that holds still as the phone moves.
+    this.rect = document.createElement('canvas');
+    this.rect.className = 'rect';
+    this.rect.width = RECT;
+    this.rect.height = RECT;
+    this.badge = document.createElement('span');
+    this.badge.className = 'cam-badge';
+    this.el.append(this.video, this.overlay, this.rect, this.badge);
+    this.view = memory ? memory.get('captureView', 'board') : 'board';
+    this.locked = false;
     this.sampler = document.createElement('canvas');
     this.overlay.addEventListener('click', (e) => this.tap(e));
     this.timer = null;
@@ -114,6 +125,8 @@ export class CaptureSession {
       const { corners } = orientCorners(img, this.corners.map(([x, y]) => [x * scale, y * scale]));
       this.corners = corners.map(([x, y]) => [x / scale, y / scale]);
       this.H = boardHomography(this.corners);
+      this.tracker = new GridTracker(img, corners);
+      this.locked = true;
     } catch {
       this.corners = [];
       this.H = null;
@@ -121,7 +134,8 @@ export class CaptureSession {
       return;
     }
     const start = occupancy(this.chess);
-    const features = readFeatures(img, this.sampleH(scale));
+    const features = readFeatures(img, this.tracker.H);
+    this.lastImg = img;
     this.reader = new BoardReader();
     this.reader.train(features, start);
     this.reading = this.reader.read(features, start);
@@ -147,8 +161,8 @@ export class CaptureSession {
   recheck() {
     if (!this.H) return;
     const start = occupancy(this.chess);
-    const { img, scale } = this.frame();
-    const features = readFeatures(img, this.sampleH(scale));
+    const features = this.features();
+    if (!features) return;
     this.reader.train(features, start);
     this.reading = this.reader.read(features, start);
     this.updateCheck();
@@ -158,6 +172,9 @@ export class CaptureSession {
 
   redoCorners() {
     this.corners = [];
+    this.tracker = null;
+    this.locked = false;
+    this.rectDrawn = false;
     this.H = null;
     this.check = null;
     this.reading = null;
@@ -184,16 +201,62 @@ export class CaptureSession {
     return boardHomography(this.corners.map(([x, y]) => [x * scale, y * scale]));
   }
 
+  // Follow the board into the current frame and read it. Null while the
+  // board is lost.
   features() {
-    if (!this.video.videoWidth || !this.H) return null;
+    if (!this.video.videoWidth || !this.tracker) return null;
     const { img, scale } = this.frame();
-    return readFeatures(img, this.sampleH(scale));
+    const r = this.tracker.track(img);
+    this.locked = r.locked;
+    this.lastImg = img;
+    // The grid in video pixels, for drawing.
+    const Hs = r.H;
+    this.H = [Hs[0] / scale, Hs[1] / scale, Hs[2] / scale, Hs[3] / scale, Hs[4] / scale, Hs[5] / scale, Hs[6], Hs[7], Hs[8]];
+    this.drawRect(img, Hs);
+    return r.locked ? readFeatures(img, Hs) : null;
   }
 
-  // Learn from a frame whose position is known, keeping half of what was learnt before.
+  // Learn from a frame whose position is known, keeping half of what was learnt
+  // before, and take it as the tracker's new reference.
   relearn(features = this.features()) {
-    if (features) this.reader.train(features, occupancy(this.chess), 0.5);
+    if (features) {
+      this.reader.train(features, occupancy(this.chess), 0.5);
+      if (this.locked && this.lastImg) this.tracker.refresh(this.lastImg);
+    }
     this.watcher.reset();
+  }
+
+  setView(view) {
+    this.view = view;
+    if (this.memory) this.memory.set('captureView', view);
+    this.onChange();
+  }
+
+  // Warp the board into a square, centred view.
+  drawRect(img, H) {
+    const ctx = this.rect.getContext('2d');
+    if (!this.rectImg) this.rectImg = ctx.createImageData(RECT, RECT);
+    const out = this.rectImg.data;
+    const { data, width, height } = img;
+    const span = 8 + 2 * RECT_MARGIN;
+    for (let y = 0; y < RECT; y++) {
+      const by = (y / RECT) * span - RECT_MARGIN;
+      for (let x = 0; x < RECT; x++) {
+        const bx = (x / RECT) * span - RECT_MARGIN;
+        const w = H[6] * bx + H[7] * by + H[8];
+        const px = Math.round((H[0] * bx + H[1] * by + H[2]) / w);
+        const py = Math.round((H[3] * bx + H[4] * by + H[5]) / w);
+        const o = (y * RECT + x) * 4;
+        if (px < 0 || py < 0 || px >= width || py >= height) { out[o] = out[o + 1] = out[o + 2] = 20; out[o + 3] = 255; continue; }
+        const k = (py * width + px) * 4;
+        out[o] = data[k];
+        out[o + 1] = data[k + 1];
+        out[o + 2] = data[k + 2];
+        out[o + 3] = 255;
+      }
+    }
+    ctx.putImageData(this.rectImg, 0, 0);
+    this.rectDrawn = true;
   }
 
   start() {
@@ -251,7 +314,11 @@ export class CaptureSession {
 
   tick() {
     const features = this.features();
-    if (!features) return;
+    if (!features) {
+      this.draw();
+      if (this.tracker && !this.locked) this.setStatus('Finding the board');
+      return;
+    }
     const occ = occupancy(this.chess);
     this.reading = this.reader.read(features, occ);
     if (this.step === 'confirm') {
@@ -340,8 +407,47 @@ export class CaptureSession {
     return c.pgn();
   }
 
+  // Grid and readings on the straightened view.
+  drawRectMarks() {
+    const ctx = this.rect.getContext('2d');
+    const span = 8 + 2 * RECT_MARGIN;
+    const q = RECT / span;
+    const at = (f, rFromTop) => [(f + RECT_MARGIN) * q, (rFromTop + RECT_MARGIN) * q];
+    ctx.strokeStyle = this.locked ? 'rgba(25, 153, 94, 0.9)' : 'rgba(214, 170, 56, 0.9)';
+    ctx.lineWidth = 1.5;
+    for (let k = 0; k <= 8; k++) {
+      ctx.beginPath(); ctx.moveTo(...at(k, 0)); ctx.lineTo(...at(k, 8)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(...at(0, k)); ctx.lineTo(...at(8, k)); ctx.stroke();
+    }
+    if (!this.reading) return;
+    for (let sq = 0; sq < 64; sq++) {
+      const [x, y] = at((sq & 7) + 0.5, 7 - (sq >> 3) + 0.5);
+      const label = this.reading.labels[sq];
+      const wrong = this.step === 'confirm' && this.check && this.check.wrongSquares.includes(sq);
+      if (this.reading.unknown[sq] || wrong) {
+        ctx.strokeStyle = '#ff5c69';
+        ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(x, y, q * 0.32, 0, Math.PI * 2); ctx.stroke();
+      }
+      if (!this.reading.unknown[sq] && label !== 'e') {
+        ctx.beginPath(); ctx.arc(x, y, q * 0.14, 0, Math.PI * 2);
+        ctx.fillStyle = label === 'w' ? '#ffffff' : '#111111';
+        ctx.fill();
+        ctx.strokeStyle = label === 'w' ? '#111111' : '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+    }
+  }
+
   // Corner markers while calibrating, the square grid afterwards.
   draw() {
+    const showRect = this.view === 'board' && !!this.rectDrawn && (this.step === 'confirm' || this.step === 'recording');
+    this.el.classList.toggle('mode-board', showRect);
+    this.badge.hidden = !this.tracker || !(this.step === 'confirm' || this.step === 'recording');
+    this.badge.textContent = this.locked ? 'Locked on' : 'Finding the board';
+    this.badge.classList.toggle('lost', !this.locked);
+    if (showRect) this.drawRectMarks();
     const vw = this.video.videoWidth || 640;
     const vh = this.video.videoHeight || 480;
     this.overlay.width = vw;

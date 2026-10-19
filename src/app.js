@@ -766,7 +766,7 @@ function capturePanel() {
   if (c.step === 'camera') return '<article class="verdict"><p class="v-line"><span class="thinking">Starting the camera</span></p></article><div id="cam-slot"></div>';
   if (c.step === 'corners') {
     return `<article class="verdict"><p class="v-line">Set up the pieces in the starting position, then tap the four corners of the board (${c.corners.length} of 4).</p>
-      <p class="small muted">Any order is fine: the pieces show which side is White. Rest the phone on something so it stays still, with all 64 squares in view.</p>${c.status ? `<p class="small neg">${esc(c.status)}</p>` : ''}</article>
+      <p class="small muted">Any order is fine: the pieces show which side is White. Keep all 64 squares in view. Once set, the grid locks on and follows the board, so you can hold the phone.</p>${c.status ? `<p class="small neg">${esc(c.status)}</p>` : ''}</article>
       <div id="cam-slot"></div>
       <div class="action-bar">${c.lastCorners && !c.corners.length ? '<button type="button" class="btn primary" data-action="captureLastCorners">Same spot as last time</button>' : ''}<button type="button" class="btn" data-action="captureRedo" ${c.corners.length ? '' : 'disabled'}>Redo corners</button><button type="button" class="btn" data-action="captureCancel">Cancel</button></div>`;
   }
@@ -779,6 +779,7 @@ function capturePanel() {
         : '<p class="v-line"><b class="neg">The pieces are hard to tell from the squares.</b> More light, or a steeper angle from above, helps. You can still try.</p>';
     return `<article class="verdict tone-${k.ok ? 'dominant' : 'passive'}">${note}
       <div class="field"><span class="label">You are playing</span>${chipGroup('captureMe', [{ value: 'w', text: 'White' }, { value: 'b', text: 'Black' }, { value: 'none', text: 'Just recording' }], state.captureMe)}</div></article>
+      <div class="chips rec-toggles">${camViewChip(c)}</div>
       <div id="cam-slot"></div>
       <div class="action-bar"><button type="button" class="btn primary" data-action="captureStart">Start recording</button><button type="button" class="btn" data-action="captureRecheck">Re-learn colours</button><button type="button" class="btn" data-action="captureRedo">Redo corners</button></div>`;
   }
@@ -794,9 +795,16 @@ function capturePanel() {
   const ask = c.candidates
     ? `<article class="rec-status rec-ask"><span class="rec-dot" aria-hidden="true"></span><div><b>${esc(c.status)}</b>${c.candidates.length ? `<div class="chips">${c.candidates.map((x, i) => `<button type="button" data-action="capturePick" data-i="${i}">${esc(x.move.san)}</button>`).join('')}</div>` : ''}<span>Or play the move on the board above.</span><button type="button" class="btn small" data-action="captureDismiss">Nothing was played</button></div></article>`
     : recStatus(c);
-  const toggles = `<div class="chips rec-toggles"><button type="button" data-action="captureSpeak" aria-pressed="${c.speak}">${c.speak ? 'Saying moves' : 'Moves muted'}</button><button type="button" data-action="captureCamera" aria-pressed="${c.showCamera}">${c.showCamera ? 'Hide camera' : 'Show camera'}</button></div>`;
+  const toggles = `<div class="chips rec-toggles"><button type="button" data-action="captureSpeak" aria-pressed="${c.speak}">${c.speak ? 'Saying moves' : 'Moves muted'}</button>${c.showCamera ? camViewChip(c) : ''}<button type="button" data-action="captureCamera" aria-pressed="${c.showCamera}">${c.showCamera ? 'Hide camera' : 'Show camera'}</button></div>`;
   return `${ask}${moveStrip(plies, plies.length)}${toggles}<div id="cam-slot" ${c.showCamera ? '' : 'hidden'}></div>
     <div class="action-bar"><button type="button" class="btn" data-action="captureUndo" ${hist.length ? '' : 'disabled'}>Undo move</button><button type="button" class="btn primary" data-action="captureFinish">Finish</button></div>`;
+}
+
+// Straightened board view, or the camera as it is.
+function camViewChip(c) {
+  return c.view === 'board'
+    ? '<button type="button" data-action="captureView" data-value="camera">Camera view</button>'
+    : '<button type="button" data-action="captureView" data-value="board">Board view</button>';
 }
 
 // The big live status while recording.
@@ -808,6 +816,7 @@ function recStatus(c) {
   const kinds = {
     'Hand over the board': ['busy', 'Hand over the board', 'It reads the move once your hand is clear.'],
     'Reading the move': ['busy', 'Reading the move', 'Hold on a moment.'],
+    'Finding the board': ['busy', 'Finding the board', 'Point the camera back at the board. It locks on again by itself.'],
     'Took back the last move. Put the pieces back on the board.': ['busy', 'Took back the last move', 'Put the pieces back where they were.'],
   };
   const [kind, title, sub] = kinds[c.status] || ['live', c.chess.history().length ? 'Watching the board' : 'Ready. Make the first move', c.chess.history().length ? toMove : 'White moves first. Missed one? Play it on the board above.'];
@@ -835,6 +844,7 @@ const CAPTURE_ACTIONS = {
   captureLastCorners: () => state.capture.useLastCorners(),
   captureSpeak: () => state.capture.setSpeak(!state.capture.speak),
   captureCamera: () => state.capture.toggleCamera(),
+  captureView: (b) => state.capture.setView(b.dataset.value),
   capturePick: (b) => { const x = state.capture.candidates[Number(b.dataset.i)]; if (x) state.capture.play(x.move); },
   captureDismiss: () => state.capture.dismiss(),
   captureUndo: () => state.capture.undo(),

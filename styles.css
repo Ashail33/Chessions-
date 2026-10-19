@@ -430,7 +430,13 @@ textarea { resize: vertical; font-family: var(--font-mono); font-size: 12px; }
 /* ---------- board capture ---------- */
 .cam { position: relative; width: 100%; border-radius: 12px; overflow: hidden; background: #000; }
 .cam video { display: block; width: 100%; height: auto; }
-.cam canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: manipulation; }
+.cam > canvas:not(.rect) { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: manipulation; }
+.cam .rect { display: none; width: 100%; aspect-ratio: 1; }
+.cam.mode-board .rect { display: block; }
+.cam.mode-board video, .cam.mode-board > canvas:not(.rect) { display: none; }
+.cam-badge { position: absolute; top: 10px; left: 10px; padding: 3px 10px 3px 22px; border-radius: 99px; background: rgba(0, 0, 0, 0.6); color: #fff; font: 600 12px/1.6 var(--font-body); }
+.cam-badge::before { content: ''; position: absolute; left: 9px; top: 50%; width: 8px; height: 8px; margin-top: -4px; border-radius: 50%; background: #3fdb8d; }
+.cam-badge.lost::before { background: #e8b23a; }
 /* live status while recording a board game */
 .rec-status { display: flex; align-items: flex-start; gap: 14px; padding: 16px; border-radius: var(--radius); background: var(--surface); border: 1px solid var(--line); }
 .rec-status > div { display: grid; gap: 4px; min-width: 0; }
