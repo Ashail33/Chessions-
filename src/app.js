@@ -22,7 +22,7 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem('chessions:' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem('chessions:' + k, JSON.stringify(v)); } catch { /* storage unavailable */ } },
 };
-const SCREENS = ['play', 'review', 'insights', 'train'];
+const SCREENS = ['play', 'record', 'review', 'insights', 'train'];
 const START_FEN = new Chess().fen();
 
 const state = {
@@ -81,7 +81,7 @@ const canMoveInPlay = () => playLive() && !state.play.thinking && playActive() &
 const emptyView = () => ({ fen: START_FEN, analysis: analysisFor(START_FEN), assessment: null, move: null });
 
 function view() {
-  if (state.screen === 'play' && state.capture) {
+  if (state.screen === 'record' && state.capture) {
     const c = state.capture.chess;
     const fen = c.fen();
     const last = c.history({ verbose: true }).pop();
@@ -99,6 +99,7 @@ function view() {
 }
 
 function userColor() {
+  if (state.screen === 'record') return state.captureMe === 'b' ? 'b' : 'w';
   if (state.screen === 'play') return state.play ? state.play.userColor : state.setup.color === 'b' ? 'b' : 'w';
   if (state.screen === 'train' && state.learn && state.learn.color) return state.learn.color;
   if (state.screen === 'train' && state.drill && state.drill.item) return state.drill.item.color;
@@ -112,7 +113,7 @@ const board = new Board($('board'), { onMove: handleBoardMove });
 function handleBoardMove(m) {
   if (state.screen === 'train' && state.learn) return answerPuzzle(m);
   if (state.screen === 'train') return answerDrill(m);
-  if (state.screen === 'play' && state.capture) {
+  if (state.screen === 'record' && state.capture) {
     if (state.capture.step === 'recording') state.capture.play(m);
     return;
   }
@@ -231,7 +232,7 @@ function render() {
   document.querySelectorAll('#tabs [data-screen]').forEach((b) => b.setAttribute('aria-current', String(b.dataset.screen === state.screen)));
   document.body.dataset.screen = state.screen;
   // The board only shows when there is something on it.
-  const showStage = state.screen === 'play' ? !!state.play || !!(state.capture && ['recording', 'done'].includes(state.capture.step)) : state.screen === 'train' ? !!((state.learn && state.learn.position) || (state.drill && state.drill.item)) : state.screen === 'review' ? !!currentGame() : false;
+  const showStage = state.screen === 'play' ? !!state.play : state.screen === 'record' ? !!(state.capture && ['recording', 'done'].includes(state.capture.step)) : state.screen === 'train' ? !!((state.learn && state.learn.position) || (state.drill && state.drill.item)) : state.screen === 'review' ? !!currentGame() : false;
   $('stage').hidden = !showStage;
   if (showStage) renderStage();
   renderPanel();
@@ -246,7 +247,7 @@ function renderStage() {
   let legal = null;
   const chess = new Chess(v.fen);
 
-  if (state.screen === 'play' && state.capture) {
+  if (state.screen === 'record' && state.capture) {
     if (state.capture.step === 'recording') legal = chess.moves({ verbose: true });
   } else if (state.screen === 'play') {
     if (canMoveInPlay()) legal = chess.moves({ verbose: true });
@@ -274,7 +275,7 @@ function renderStage() {
   }
 
   // While recording a board game the overlays are noise: show a plain board.
-  const recording = state.screen === 'play' && !!state.capture;
+  const recording = state.screen === 'record' && !!state.capture;
   $('share').hidden = recording;
   $('lens').hidden = recording;
   $('legend').hidden = recording;
@@ -309,7 +310,7 @@ function renderStage() {
   if (v.move) label = `${moveNo(v.move)} ${v.move.san}`;
   if (state.screen === 'train') label = state.learn ? (state.learn.view === 'puzzle' ? SKILL_LEVELS[learnSkill(state.learn.id).level].text : 'Example') : state.drill ? `${state.drill.right}/${state.drill.done} solved` : '';
   $('nav-pos').textContent = label;
-  const navigable = state.screen === 'review' || (state.screen === 'play' && state.play && !state.capture);
+  const navigable = state.screen === 'review' || (state.screen === 'play' && state.play);
   document.querySelector('.boardbar').classList.toggle('no-nav', !navigable);
 
   $('stage-head').innerHTML = stageHead();
@@ -320,7 +321,7 @@ function renderStage() {
 }
 
 function stageHead() {
-  if (state.screen === 'play' && state.capture) {
+  if (state.screen === 'record' && state.capture) {
     const c = state.capture.chess;
     return `<div class="who"><b>Recording a board game</b><span>${c.history().length} moves \u00b7 ${sideName(c.turn())} to move</span></div>`;
   }
@@ -353,7 +354,7 @@ function stageHead() {
 
 function renderPanel() {
   const el = $('panel');
-  const html = { play: playPanel, review: reviewPanel, insights: insightsPanel, train: trainPanel }[state.screen]();
+  const html = { play: playPanel, record: recordPanel, review: reviewPanel, insights: insightsPanel, train: trainPanel }[state.screen]();
   el.innerHTML = html;
   const slot = $('cam-slot');
   if (slot && state.capture) slot.append(state.capture.el);
@@ -386,7 +387,6 @@ function bindPanel(el) {
 
 // ---------- Play ----------
 function playPanel() {
-  if (state.capture) return capturePanel();
   const s = state.play;
   if (!s) return playSetup();
   const live = playLive();
@@ -498,7 +498,6 @@ function playSetup() {
   const weak = ws.length ? `<article class="setup"><h2>Practise your weak spots</h2>
       <ul class="rows">${ws.slice(0, 3).map((w, i) => `<li><div class="row-head"><b>${esc(w.title)}</b></div><span class="small muted">${esc(w.practice.focus || 'Start from your opening position')}</span>${practiceHistory(w.key)}<div class="actions"><button type="button" class="btn small primary" data-action="practise" data-weak="${i}">Practise</button></div></li>`).join('')}</ul>
     </article>` : '';
-  const record = `<article class="setup"><h2>Record a game on a real board</h2><p>Prop your phone above the board and play. The camera follows the moves and gives you the PGN to analyse.</p><button type="button" class="btn wide" data-action="startCapture">Start recording</button></article>`;
   return `${weak}<article class="setup">
     <h2>Play Stockfish</h2>
     <div class="field"><span class="label">Play as</span>${chipGroup('color', [{ value: 'w', text: 'White' }, { value: 'b', text: 'Black' }, { value: 'r', text: 'Random' }], state.setup.color)}</div>
@@ -506,7 +505,22 @@ function playSetup() {
     <div class="field"><span class="label">Punish</span>${chipGroup('punish', punish, state.setup.punish)}<p class="note">${punishNote}</p></div>
     <button type="button" class="btn primary wide" data-action="startGame">Start game</button>
     <p class="status ${state.engineError ? 'error' : ''}" id="play-status">${state.engineError ? esc(state.engineError) : ''}</p>
-  </article>${record}`;
+  </article>`;
+}
+
+// ---------- Record ----------
+function recordPanel() {
+  if (state.capture) return capturePanel();
+  return `<article class="setup"><h2>Record a game on a real board</h2>
+    <p>Play over the board and the camera writes down the moves. When you finish, analyse the game or copy the PGN.</p>
+    <ul class="tips">
+      <li><b>Set up the starting position</b> and point the camera at the board. It finds the board by itself.</li>
+      <li><b>Look down from high up</b>, as close to overhead as you can. From low down, tall pieces hide the squares behind them.</li>
+      <li><b>Keep all 64 squares in view</b> and the light even. Holding the phone is fine; it follows the board.</li>
+      <li>If it misses a move or isn’t sure, it asks, and you can always play the move on the on-screen board.</li>
+    </ul>
+    <button type="button" class="btn primary wide" data-action="startCapture">Start recording</button>
+  </article>`;
 }
 
 // ---------- Review ----------
@@ -850,7 +864,7 @@ function captureNames() {
 const CAPTURE_ACTIONS = {
   startCapture: () => {
     if (state.check) state.check.cancelled = true;
-    state.capture = new CaptureSession({ onChange: () => { if (state.screen === 'play') render(); }, memory: store });
+    state.capture = new CaptureSession({ onChange: () => { if (state.screen === 'record') render(); }, memory: store });
     state.flipped = false;
     render();
     state.capture.open();

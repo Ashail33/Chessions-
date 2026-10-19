@@ -90,7 +90,7 @@ svg { fill: currentColor; }
 
 .tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 6;
-  display: grid; grid-template-columns: repeat(4, 1fr);
+  display: grid; grid-template-columns: repeat(5, 1fr);
   background: var(--surface); border-top: 1px solid var(--line);
   padding: 6px max(8px, var(--safe-right)) calc(6px + var(--safe-bottom)) max(8px, var(--safe-left));
 }
@@ -456,6 +456,8 @@ textarea { resize: vertical; font-family: var(--font-mono); font-size: 12px; }
 .rec-played .mono { font-family: var(--font-mono); font-weight: 600; }
 @keyframes rec-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); } 100% { box-shadow: 0 0 0 12px transparent; } }
 .rec-toggles button[aria-pressed="false"] { opacity: 0.7; }
+.tips { margin: 0; padding-left: 18px; display: grid; gap: 6px; color: var(--muted); }
+.tips b { color: var(--fg); font-weight: 600; }
 .cam-hint { margin: 0; padding: 10px 14px; border-radius: var(--radius); background: color-mix(in srgb, var(--warn) 18%, var(--surface)); border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line)); font-size: 14px; }
 @media (prefers-reduced-motion: reduce) { .rec-live .rec-dot, .rec-played { animation: none; } }
 #capture-pgn { font-size: 12px; }
