@@ -10,7 +10,7 @@
 //    otherwise the dark corner nearest the camera.
 // 5. The grid is refined on every crossing that can be found.
 
-import { orientCorners, boardHomography, fitHomography, project, toGray } from './vision.js';
+import { orientCorners, boardHomography, fitHomography, project, toGray, readFeatures, BoardReader } from './vision.js';
 
 const RING = 16;
 
@@ -388,4 +388,20 @@ function orientByColour(quad, gray) {
     // Does a corner order put a1 on a dark square?
     parityOk: (corners) => valid.some((o) => same(o.corners, corners) || same(o.corners, [2, 3, 0, 1].map((i) => corners[i]))),
   };
+}
+
+// Find the board again after losing it (the camera moved a lot), mid-game.
+// Of the four ways round, keep the one whose reading best matches the position
+// we know is on the board. reader: a trained BoardReader; occ: occupancy.
+export function relocate(img, reader, occ) {
+  const found = detectBoard(img);
+  if (!found) return null;
+  let best = null;
+  for (let k = 0; k < 4; k++) {
+    const corners = [0, 1, 2, 3].map((i) => found.corners[(i + k) % 4]);
+    const reading = reader.read(readFeatures(img, boardHomography(corners)), occ);
+    const { cost, wrong } = BoardReader.cost(reading, occ);
+    if (!best || cost < best.cost) best = { corners, cost, wrong };
+  }
+  return best.wrong <= 4 ? best.corners : null;
 }

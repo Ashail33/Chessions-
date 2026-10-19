@@ -562,11 +562,33 @@ export function fitHomography(src, dst, weights = null) {
   return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
 }
 
-const translateH = (H, dx, dy) => [H[0] + dx * H[6], H[1] + dx * H[7], H[2] + dx * H[8], H[3] + dy * H[6], H[4] + dy * H[7], H[5] + dy * H[8], H[6], H[7], H[8]];
+
+const mul3 = (A, B) => [
+  A[0] * B[0] + A[1] * B[3] + A[2] * B[6], A[0] * B[1] + A[1] * B[4] + A[2] * B[7], A[0] * B[2] + A[1] * B[5] + A[2] * B[8],
+  A[3] * B[0] + A[4] * B[3] + A[5] * B[6], A[3] * B[1] + A[4] * B[4] + A[5] * B[7], A[3] * B[2] + A[4] * B[5] + A[5] * B[8],
+  A[6] * B[0] + A[7] * B[3] + A[8] * B[6], A[6] * B[1] + A[7] * B[4] + A[8] * B[7], A[6] * B[2] + A[7] * B[5] + A[8] * B[8],
+];
+
+// Image transform: scale s and turn a about (cx, cy), then shift (tx, ty).
+const similarity = (s, a, cx, cy, tx, ty) => {
+  const c = s * Math.cos(a);
+  const n = s * Math.sin(a);
+  return [c, -n, cx + tx - c * cx + n * cy, n, c, cy + ty - n * cx - c * cy, 0, 0, 1];
+};
+
+// Patches are laid out in board squares, not pixels, so they grow, shrink and
+// turn with the board as the camera moves.
+const PATCH = 6;
+const PATCH_SPAN = 0.22; // squares either side of a crossing
 
 export class GridTracker {
   // img: RGBA frame; corners: a8, h8, h1, a1 in its pixels.
   constructor(img, corners) {
+    this.reset(img, corners);
+  }
+
+  // Start again from known corners (e.g. after finding the board again).
+  reset(img, corners) {
     this.H = boardHomography(corners);
     this.locked = true;
     this.lost = 0;
@@ -576,24 +598,25 @@ export class GridTracker {
   // Take the current frame as the new reference (after a move, when locked).
   refresh(img) {
     const gray = toGray(img);
-    this.ref = gray;
     this.sinceRefresh = 0;
-    // Grid crossings, including the outer edge, as board points.
-    const [ax, ay] = project(this.H, 0, 0);
-    const [bx, by] = project(this.H, 8, 8);
-    const sqPx = Math.hypot(bx - ax, by - ay) / (8 * Math.SQRT2);
-    this.r = Math.max(3, Math.round(sqPx * 0.2));
-    this.search = Math.max(4, Math.round(sqPx * 0.22));
     this.offsets = [];
-    for (let y = -this.r; y <= this.r; y += 2) for (let x = -this.r; x <= this.r; x += 2) this.offsets.push([x, y]);
+    for (let a = 0; a < PATCH; a++) for (let b = 0; b < PATCH; b++) {
+      this.offsets.push([-PATCH_SPAN + (2 * PATCH_SPAN * (a + 0.5)) / PATCH, -PATCH_SPAN + (2 * PATCH_SPAN * (b + 0.5)) / PATCH]);
+    }
+    // Grid crossings, including the outer edge.
     this.points = [];
     for (let i = 0; i <= 8; i++) for (let j = 0; j <= 8; j++) {
-      const [x, y] = project(this.H, i, j);
-      const patch = this.patch(gray, Math.round(x), Math.round(y));
-      if (patch) this.points.push({ b: [i, j], patch });
+      const pts = this.patchPoints(this.H, i, j);
+      const vals = new Float32Array(this.offsets.length);
+      let inside = true;
+      for (let k = 0; k < vals.length && inside; k++) {
+        const v = pixel(gray, pts[2 * k], pts[2 * k + 1]);
+        if (v === null) inside = false; else vals[k] = v;
+      }
+      if (inside) this.points.push({ b: [i, j], patch: normalise1(vals) });
     }
     // Coarse template: the whole board (and a little of its surroundings) in
-    // board coordinates, so it follows the board as it turns and scales.
+    // board coordinates.
     const N = 40;
     const bpts = [];
     const ref = [];
@@ -601,20 +624,28 @@ export class GridTracker {
       const bx = -0.25 + (8.5 * (i + 0.5)) / N;
       const by = -0.25 + (8.5 * (j + 0.5)) / N;
       const [x, y] = project(this.H, bx, by);
-      const px = Math.round(x);
-      const py = Math.round(y);
-      if (px < 0 || py < 0 || px >= gray.width || py >= gray.height) continue;
+      const v = pixel(gray, x, y);
+      if (v === null) continue;
       bpts.push([bx, by]);
-      ref.push(gray.g[py * gray.width + px]);
+      ref.push(v);
     }
     this.coarse = { bpts, ref: Float32Array.from(ref) };
   }
 
-  // Correlation of the whole-board template placed by the last fit and shifted
-  // by (dx, dy). Samples outside the frame are left out, so a board partly out
-  // of view still matches.
-  coarseAt(gray, pts, dx, dy) {
-    const { ref } = this.coarse;
+  // Image positions of a crossing's patch samples under H.
+  patchPoints(H, i, j) {
+    const out = new Float32Array(this.offsets.length * 2);
+    this.offsets.forEach(([du, dv], k) => {
+      const [x, y] = project(H, i + du, j + dv);
+      out[2 * k] = x;
+      out[2 * k + 1] = y;
+    });
+    return out;
+  }
+
+  // Correlation of reference values with the frame at points shifted by
+  // (dx, dy). Points outside the frame are left out; too few gives -2.
+  static correlate(gray, ref, pts, dx, dy, need) {
     const { g, width, height } = gray;
     let n = 0;
     let sa = 0;
@@ -623,8 +654,8 @@ export class GridTracker {
     let sbb = 0;
     let sab = 0;
     for (let k = 0; k < ref.length; k++) {
-      const x = pts[2 * k] + dx;
-      const y = pts[2 * k + 1] + dy;
+      const x = Math.round(pts[2 * k] + dx);
+      const y = Math.round(pts[2 * k + 1] + dy);
       if (x < 0 || y < 0 || x >= width || y >= height) continue;
       const a = ref[k];
       const b = g[y * width + x];
@@ -635,85 +666,101 @@ export class GridTracker {
       sbb += b * b;
       sab += a * b;
     }
-    if (n < ref.length * 0.6) return -2;
+    if (n < ref.length * need) return -2;
     const cov = sab - (sa * sb) / n;
     const va = saa - (sa * sa) / n;
     const vb = sbb - (sb * sb) / n;
     return va > 1e-6 && vb > 1e-6 ? cov / Math.sqrt(va * vb) : -2;
   }
 
-  // How far the board moved since the last frame, as a whole.
-  coarseShift(gray) {
-    const pts = new Int32Array(this.coarse.bpts.length * 2);
-    this.coarse.bpts.forEach(([bx, by], k) => {
+  // How the board moved since the last frame, as a whole: a shift first, then
+  // a little bigger, smaller or turned (the camera moving back, in or round).
+  // Returns { score, S } with S the image transform from the last fit.
+  coarseMove(gray, wide = false) {
+    const { bpts, ref } = this.coarse;
+    const base = new Float32Array(bpts.length * 2);
+    let cx = 0;
+    let cy = 0;
+    bpts.forEach(([bx, by], k) => {
       const [x, y] = project(this.H, bx, by);
-      pts[2 * k] = Math.round(x);
-      pts[2 * k + 1] = Math.round(y);
+      base[2 * k] = x;
+      base[2 * k + 1] = y;
+      cx += x / bpts.length;
+      cy += y / bpts.length;
     });
-    let best = { score: -Infinity, dx: 0, dy: 0 };
-    const tryAt = (dx, dy) => {
-      const score = this.coarseAt(gray, pts, dx, dy);
-      if (score > best.score) best = { score, dx, dy };
+    const at = (S) => {
+      const pts = new Float32Array(base.length);
+      for (let k = 0; k < base.length; k += 2) {
+        const x = base[k];
+        const y = base[k + 1];
+        pts[k] = S[0] * x + S[1] * y + S[2];
+        pts[k + 1] = S[3] * x + S[4] * y + S[5];
+      }
+      return GridTracker.correlate(gray, ref, pts, 0, 0, 0.6);
     };
-    // Search wider once the board has been lost, to find it again.
-    const R = this.lost > 2 ? 120 : 32;
-    const step = this.lost > 2 ? 6 : 4;
-    for (let dy = -R; dy <= R; dy += step) for (let dx = -R; dx <= R; dx += step) tryAt(dx, dy);
-    const c = best;
-    for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) tryAt(c.dx + dx, c.dy + dy);
-    return best;
-  }
-
-  // Patch around (cx, cy), sampled every other pixel, zero-mean and unit length.
-  patch(gray, cx, cy) {
-    const { g, width, height } = gray;
-    const r = this.r;
-    if (cx - r < 0 || cy - r < 0 || cx + r >= width || cy + r >= height) return null;
-    const out = new Float32Array(this.offsets.length);
-    for (let k = 0; k < out.length; k++) out[k] = g[(cy + this.offsets[k][1]) * width + cx + this.offsets[k][0]];
-    return normalise1(out);
-  }
-
-  // Correlation of a reference patch with the frame at (cx, cy), without allocating.
-  ncc(gray, ref, cx, cy) {
-    const { g, width, height } = gray;
-    const r = this.r;
-    if (cx - r < 0 || cy - r < 0 || cx + r >= width || cy + r >= height) return -2;
-    let d = 0;
-    let sum = 0;
-    let sq = 0;
-    const n = ref.length;
-    for (let k = 0; k < n; k++) {
-      const v = g[(cy + this.offsets[k][1]) * width + cx + this.offsets[k][0]];
-      d += ref[k] * v;
-      sum += v;
-      sq += v * v;
+    let best = { score: -Infinity, s: 1, a: 0, tx: 0, ty: 0 };
+    const tryAt = (s, a, tx, ty) => {
+      const score = at(similarity(s, a, cx, cy, tx, ty));
+      if (score > best.score) best = { score, s, a, tx, ty };
+    };
+    // Shift (searched wider on a jolt, or once the board has been lost).
+    const R = wide || this.lost > 2 ? 120 : 32;
+    const step = wide || this.lost > 2 ? 6 : 4;
+    // On a jolt the board may also have turned or changed size, so the wide
+    // search tries a few of those as it shifts.
+    const sizes = wide ? [0.9, 1, 1.1] : [1];
+    const turns = wide ? [-0.1, 0, 0.1] : [0];
+    for (const s0 of sizes) for (const a0 of turns) {
+      const S = similarity(s0, a0, cx, cy, 0, 0);
+      const pts = s0 === 1 && a0 === 0 ? base : base.map((v, k) => (k % 2 ? S[3] * base[k - 1] + S[4] * v + S[5] : S[0] * v + S[1] * base[k + 1] + S[2]));
+      for (let ty = -R; ty <= R; ty += step) for (let tx = -R; tx <= R; tx += step) {
+        const score = GridTracker.correlate(gray, ref, pts, tx, ty, 0.6);
+        if (score > best.score) best = { score, s: s0, a: a0, tx, ty };
+      }
     }
-    const varc = sq - (sum * sum) / n;
-    return varc > 1e-6 ? d / Math.sqrt(varc) : -2;
+    // Size and turn, then the shift again, narrowing three times.
+    for (let round = 0; round < 3; round++) {
+      const c = best;
+      const ds = [0.08, 0.04, 0.02][round];
+      const da = [0.07, 0.035, 0.015][round];
+      for (const s of [c.s * (1 - ds), c.s, c.s * (1 + ds)]) for (const a of [c.a - da, c.a, c.a + da]) tryAt(s, a, c.tx, c.ty);
+      const d = best;
+      for (let ty = -3; ty <= 3; ty++) for (let tx = -3; tx <= 3; tx++) tryAt(d.s, d.a, d.tx + tx, d.ty + ty);
+    }
+    return { score: best.score, S: similarity(best.s, best.a, cx, cy, best.tx, best.ty) };
   }
 
   // Follow the board into a new frame. Returns { H, locked, matched }.
   track(img) {
     const gray = toGray(img);
-    const coarse = this.coarseShift(gray);
+    let coarse = this.coarseMove(gray);
+    // A jolt bigger than the usual window: look again, wider.
+    if (coarse.score < 0.5 && this.lost <= 2) coarse = this.coarseMove(gray, true);
     if (coarse.score < 0.5) return this.miss();
-    // Predict from the last fit, moved by how far the board shifted since last frame.
-    const pred = translateH(this.H, coarse.dx, coarse.dy);
+    const pred = mul3(coarse.S, this.H);
+    const [ax, ay] = project(pred, 0, 0);
+    const [bx, by] = project(pred, 8, 8);
+    const sqPx = Math.hypot(bx - ax, by - ay) / (8 * Math.SQRT2);
+    const R = Math.max(3, Math.round(sqPx * 0.18));
     const src = [];
     const dst = [];
     const w = [];
     for (const p of this.points) {
-      const [x, y] = project(pred, p.b[0], p.b[1]);
-      const m = this.match(gray, p.patch, Math.round(x), Math.round(y));
-      if (m && m.score > 0.75) { src.push(p.b); dst.push([m.x, m.y]); w.push(m.score); }
+      const pts = this.patchPoints(pred, p.b[0], p.b[1]);
+      const m = GridTracker.peak(gray, p.patch, pts, R);
+      if (m && m.score > 0.75) {
+        const [x, y] = project(pred, p.b[0], p.b[1]);
+        src.push(p.b);
+        dst.push([x + m.dx, y + m.dy]);
+        w.push(m.score);
+      }
     }
     if (src.length < 10) return this.miss();
     // Fit, drop the worst matches, fit again.
     let H = fitHomography(src, dst, w);
     for (let pass = 0; pass < 2; pass++) {
-      const res = src.map((b, i) => { const [x, y] = project(H, b[0], b[1]); return Math.hypot(x - dst[i][0], y - dst[i][1]); });
-      const keep = res.map((e) => e < 2.5);
+      const tol = Math.max(2.5, sqPx * 0.08);
+      const keep = src.map((b, i) => { const [x, y] = project(H, b[0], b[1]); return Math.hypot(x - dst[i][0], y - dst[i][1]) < tol; });
       if (keep.filter(Boolean).length < 10) break;
       H = fitHomography(src.filter((_, i) => keep[i]), dst.filter((_, i) => keep[i]), w.filter((_, i) => keep[i]));
     }
@@ -721,7 +768,7 @@ export class GridTracker {
     this.locked = true;
     this.lost = 0;
     // A clean view (nearly every crossing matched, so no hand in the way):
-    // take it as the new reference now and then, so slow turns don't build up.
+    // take it as the new reference now and then, so slow changes don't build up.
     if (++this.sinceRefresh > 12 && src.length >= 0.85 * this.points.length) this.refresh(img);
     return { H, locked: true, matched: src.length };
   }
@@ -732,28 +779,33 @@ export class GridTracker {
     return { H: this.H, locked: this.locked, matched: 0 };
   }
 
-  // Best correlation for a patch near (cx, cy): every other pixel first, then
-  // the neighbours of the best, then a sub-pixel peak.
-  match(gray, patch, cx, cy) {
-    const R = this.search;
+  // Best shift (within R pixels) of a patch's points: every other pixel first,
+  // then the neighbours of the best, then a sub-pixel peak.
+  static peak(gray, ref, pts, R) {
     let best = { score: -Infinity, dx: 0, dy: 0 };
+    const at = (dx, dy) => GridTracker.correlate(gray, ref, pts, dx, dy, 1);
     for (let dy = -R; dy <= R; dy += 2) for (let dx = -R; dx <= R; dx += 2) {
-      const sc = this.ncc(gray, patch, cx + dx, cy + dy);
+      const sc = at(dx, dy);
       if (sc > best.score) best = { score: sc, dx, dy };
     }
     const c = best;
     for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
       if (!dx && !dy) continue;
-      const sc = this.ncc(gray, patch, cx + c.dx + dx, cy + c.dy + dy);
+      const sc = at(c.dx + dx, c.dy + dy);
       if (sc > best.score) best = { score: sc, dx: c.dx + dx, dy: c.dy + dy };
     }
     if (best.score < -1) return null;
-    const at = (dx, dy) => this.ncc(gray, patch, cx + best.dx + dx, cy + best.dy + dy);
     const sub = (a, b, c2) => (a < -1 || c2 < -1 ? 0 : Math.max(-0.5, Math.min(0.5, (a - c2) / (2 * (a - 2 * b + c2) || 1))));
-    const ox = sub(at(-1, 0), best.score, at(1, 0));
-    const oy = sub(at(0, -1), best.score, at(0, 1));
-    return { score: best.score, x: cx + best.dx + ox, y: cy + best.dy + oy };
+    const ox = sub(at(best.dx - 1, best.dy), best.score, at(best.dx + 1, best.dy));
+    const oy = sub(at(best.dx, best.dy - 1), best.score, at(best.dx, best.dy + 1));
+    return { score: best.score, dx: best.dx + ox, dy: best.dy + oy };
   }
+}
+
+function pixel(gray, x, y) {
+  const px = Math.round(x);
+  const py = Math.round(y);
+  return px < 0 || py < 0 || px >= gray.width || py >= gray.height ? null : gray.g[py * gray.width + px];
 }
 
 function normalise1(v) {

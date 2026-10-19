@@ -3,7 +3,7 @@
 // the moves it sees to the app.
 
 import { Chess } from '../vendor/chess.js';
-import { detectBoard } from './detect.js';
+import { detectBoard, relocate } from './detect.js';
 import { boardHomography, readFeatures, orientCorners, BoardReader, MoveWatcher, GridTracker, occupancy, squarePoint, project } from './vision.js';
 
 export const CORNER_ORDER = ['a8', 'h8', 'h1', 'a1'];
@@ -277,7 +277,17 @@ export class CaptureSession {
   features() {
     if (!this.video.videoWidth || !this.tracker) return null;
     const { img, scale } = this.frame();
-    const r = this.tracker.track(img);
+    let r = this.tracker.track(img);
+    // Lost it (the camera moved a lot): look for the whole board again, any
+    // size or angle, and keep the way round that matches the position.
+    if (!r.locked && this.reader && this.reader.model && (this.lostTicks = (this.lostTicks || 0) + 1) % 2 === 0) {
+      const corners = relocate(img, this.reader, occupancy(this.chess));
+      if (corners) {
+        this.tracker.reset(img, corners);
+        r = { H: this.tracker.H, locked: true };
+      }
+    }
+    if (r.locked) this.lostTicks = 0;
     this.locked = r.locked;
     this.lastImg = img;
     // The grid in video pixels, for drawing.
