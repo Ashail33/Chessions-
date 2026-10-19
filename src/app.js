@@ -777,7 +777,9 @@ function capturePanel() {
   }
   if (c.step === 'confirm') {
     const k = c.check || { ok: false, wrong: 0, separation: 0 };
-    const note = k.ok
+    const note = c.settling
+      ? '<p class="v-line"><span class="thinking">Found the board. Checking the pieces</span></p>'
+      : k.ok
       ? '<p class="v-line"><b class="pos">All 32 pieces found.</b> White and black dots show what the camera reads on each square.</p>'
       : k.wrong > 12
         ? '<p class="v-line"><b class="neg">Set up the starting position.</b> The board is found; recording starts from the starting position. If the pieces are set up and White is on the wrong side, tap Turn board.</p>'

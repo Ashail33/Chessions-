@@ -23,31 +23,47 @@ function ringOffsets(r) {
   return out;
 }
 
-// ChESS response at every pixel (max over two ring sizes). Positive means an X.
-export function crossingResponse(gray, radii = [5, 8]) {
+// ChESS response (max over two ring sizes); positive means an X. Over the
+// whole image, or with lazy, as a lookup worked out only where asked.
+export function crossingResponse(gray, radii = [5, 8], lazy = false) {
   const { g, width, height } = gray;
-  const R = new Float32Array(width * height);
-  const rings = radii.map(ringOffsets);
+  // Ring samples as flat offsets into the image.
+  const rings = radii.map((r) => Int32Array.from(ringOffsets(r), ([dx, dy]) => dy * width + dx));
   const pad = Math.max(...radii) + 1;
   const I = new Float32Array(RING);
-  for (let y = pad; y < height - pad; y++) {
-    for (let x = pad; x < width - pad; x++) {
-      const c = y * width + x;
-      const local = (g[c] + g[c - 1] + g[c + 1] + g[c - width] + g[c + width]) / 5;
-      let best = -Infinity;
-      for (const ring of rings) {
-        let mean = 0;
-        for (let n = 0; n < RING; n++) { I[n] = g[c + ring[n][1] * width + ring[n][0]]; mean += I[n]; }
-        mean /= RING;
-        let sum = 0;
-        for (let n = 0; n < 4; n++) sum += Math.abs(I[n] + I[n + 8] - I[n + 4] - I[n + 12]);
-        let diff = 0;
-        for (let n = 0; n < 8; n++) diff += Math.abs(I[n] - I[n + 8]);
-        const v = sum - diff - 16 * Math.abs(mean - local) / 4;
-        if (v > best) best = v;
-      }
-      R[c] = best;
+  const at = (c) => {
+    const local = (g[c] + g[c - 1] + g[c + 1] + g[c - width] + g[c + width]) * 0.2;
+    let best = -Infinity;
+    for (let q = 0; q < rings.length; q++) {
+      const ring = rings[q];
+      let mean = 0;
+      for (let n = 0; n < RING; n++) { const v = g[c + ring[n]]; I[n] = v; mean += v; }
+      mean *= 1 / RING;
+      const sum = Math.abs(I[0] + I[8] - I[4] - I[12]) + Math.abs(I[1] + I[9] - I[5] - I[13])
+        + Math.abs(I[2] + I[10] - I[6] - I[14]) + Math.abs(I[3] + I[11] - I[7] - I[15]);
+      const diff = Math.abs(I[0] - I[8]) + Math.abs(I[1] - I[9]) + Math.abs(I[2] - I[10]) + Math.abs(I[3] - I[11])
+        + Math.abs(I[4] - I[12]) + Math.abs(I[5] - I[13]) + Math.abs(I[6] - I[14]) + Math.abs(I[7] - I[15]);
+      const v = sum - diff - 4 * Math.abs(mean - local);
+      if (v > best) best = v;
     }
+    return best;
+  };
+  if (lazy) {
+    const memo = new Map();
+    return {
+      get: (x, y) => {
+        if (x < pad || y < pad || x >= width - pad || y >= height - pad) return -Infinity;
+        const c = y * width + x;
+        let v = memo.get(c);
+        if (v === undefined) { v = at(c); memo.set(c, v); }
+        return v;
+      },
+    };
+  }
+  const R = new Float32Array(width * height);
+  for (let y = pad; y < height - pad; y++) {
+    const row = y * width;
+    for (let x = pad; x < width - pad; x++) R[row + x] = at(row + x);
   }
   return R;
 }
@@ -156,13 +172,45 @@ function refine(H, pts) {
   return src.length >= 12 ? fitHomography(src, dst) : H;
 }
 
+// Half-size grey image (2x2 averages), for a quick first search.
+function halve(gray) {
+  const { g, width, height } = gray;
+  const w = width >> 1;
+  const h = height >> 1;
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const k = 2 * y * width + 2 * x;
+    out[y * w + x] = (g[k] + g[k + 1] + g[k + width] + g[k + width + 1]) / 4;
+  }
+  return { g: out, width: w, height: h };
+}
+
+// Crossings: found on the half-size image (a quarter of the work), then each
+// one sharpened on the full image.
+function findCrossings(gray) {
+  const small = halve(gray);
+  const coarse = crossingPoints(small, crossingResponse(small, [4]));
+  const full = crossingResponse(gray, [5, 8], true);
+  return coarse.map((p) => {
+    const cx = Math.round(p.x * 2 + 0.5);
+    const cy = Math.round(p.y * 2 + 0.5);
+    let best = { v: -Infinity, x: cx, y: cy };
+    for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+      const v = full.get(cx + dx, cy + dy);
+      if (v > best.v) best = { v, x: cx + dx, y: cy + dy };
+    }
+    const at = (dx, dy) => full.get(best.x + dx, best.y + dy);
+    const sub = (a, b, c) => (a === -Infinity || c === -Infinity ? 0 : Math.max(-0.5, Math.min(0.5, (a - c) / (2 * (a - 2 * b + c) || 1))));
+    return { x: best.x + sub(at(-1, 0), best.v, at(1, 0)), y: best.y + sub(at(0, -1), best.v, at(0, 1)), v: p.v };
+  });
+}
+
 // Find the board. img: RGBA frame. Returns { corners (a8, h8, h1, a1), byPieces,
 // crossings } or null. info, if given, is filled in with how far it got
 // ({ crossings, lattice }), for telling the user what to fix.
 export function detectBoard(img, info = {}) {
   const gray = toGray(img);
-  const R = crossingResponse(gray);
-  const pts = crossingPoints(gray, R);
+  const pts = findCrossings(gray);
   info.crossings = pts.length;
   info.lattice = 0;
   if (pts.length < 12) return null;
@@ -207,15 +255,19 @@ export function detectBoard(img, info = {}) {
       const toLat = (bx, by) => [bx - oi + i0, by - oj + j0];
       const quad = [[0, 0], [8, 0], [8, 8], [0, 8]].map(([bx, by]) => project(best.H, ...toLat(bx, by)));
       if (quad.some(([x, y]) => x < -0.15 * img.width || y < -0.15 * img.height || x > 1.15 * img.width || y > 1.15 * img.height)) continue;
-      // The edge always counts; pieces in their starting squares count too.
-      const edge = edgeScore(lum, i0 - oi, j0 - oj);
-      let pieces = null;
-      try { pieces = orientCorners(img, quad); } catch { /* degenerate */ }
-      const sep = pieces ? Math.max(0, pieces.separation) : 0;
-      hyps.push({ oi, oj, quad, edge, sep, pieces, score: edge + sep });
+      hyps.push({ oi, oj, quad, edge: edgeScore(lum, i0 - oi, j0 - oj) });
     }
   }
   if (!hyps.length) return null;
+  // The edge always counts; pieces in their starting squares count too (only
+  // worth checking for the few placements the edge already likes).
+  hyps.sort((a, b) => b.edge - a.edge);
+  hyps.forEach((h, k) => {
+    h.pieces = null;
+    if (k < 4) try { h.pieces = orientCorners(img, h.quad); } catch { /* degenerate */ }
+    h.sep = h.pieces ? Math.max(0, h.pieces.separation) : 0;
+    h.score = h.edge + h.sep;
+  });
   hyps.sort((a, b) => b.score - a.score);
   const top = hyps[0];
   const margin = hyps[1] ? top.score - hyps[1].score : top.score;

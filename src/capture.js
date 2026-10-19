@@ -158,6 +158,11 @@ export class CaptureSession {
     this.timer = setInterval(() => this.tick(), 200);
   }
 
+  // Just after locking on, while wrong squares may still be the camera settling.
+  get settling() {
+    return !!this.check && this.check.wrong > 0 && performance.now() - (this.calibratedAt || 0) < 3000;
+  }
+
   // Half a turn, for when the app guessed White's side wrong.
   turnBoard() {
     if (!this.corners || this.corners.length !== 4) return;
@@ -212,12 +217,13 @@ export class CaptureSession {
     this.agreeing = 0;
     this.searching = true;
     clearTimeout(this.searchTimer);
+    // Back to back, with just a breath between tries so the screen keeps up.
     const loop = () => {
       if (this.step !== 'corners' || !this.searching) return;
       this.search();
-      this.searchTimer = setTimeout(loop, 300);
+      this.searchTimer = setTimeout(loop, 60);
     };
-    this.searchTimer = setTimeout(loop, 300);
+    this.searchTimer = setTimeout(loop, 0);
   }
 
   search() {
@@ -236,9 +242,10 @@ export class CaptureSession {
     const agree = prev && Math.max(...corners.map(([x, y], i) => Math.hypot(x - prev[i][0], y - prev[i][1]))) < 6 / scale;
     this.agreeing = agree ? this.agreeing + 1 : 0;
     this.candidate = corners;
-    // Cameras spend their first second or so settling exposure and colour, so
-    // wait for that and for the board to hold still over a few frames.
-    if (this.agreeing >= 2 && performance.now() - (this.openedAt || 0) > 1500) {
+    // Cameras take a moment to settle exposure and colour, so wait for that
+    // and for two looks at the board to agree. (The setup check re-learns the
+    // colours for a few seconds anyway.)
+    if (this.agreeing >= 1 && performance.now() - (this.openedAt || 0) > 700) {
       this.searching = false;
       this.corners = corners;
       this.calibrate({ orient: found.byPieces });
@@ -394,7 +401,8 @@ export class CaptureSession {
         this.reader.train(features, occ);
         this.reading = this.reader.read(features, occ);
       }
-      const changed = this.updateCheck();
+      let changed = this.updateCheck();
+      if (this.settling !== this.wasSettling) { this.wasSettling = this.settling; changed = true; }
       this.draw();
       if (changed) this.onChange();
       return;
