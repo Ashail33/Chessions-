@@ -3,6 +3,7 @@
 // the moves it sees to the app.
 
 import { Chess } from '../vendor/chess.js';
+import { detectBoard } from './detect.js';
 import { boardHomography, readFeatures, orientCorners, BoardReader, MoveWatcher, GridTracker, occupancy, squarePoint, project } from './vision.js';
 
 export const CORNER_ORDER = ['a8', 'h8', 'h1', 'a1'];
@@ -76,6 +77,8 @@ export class CaptureSession {
       await new Promise((r) => (this.video.videoWidth ? r() : this.video.addEventListener('loadedmetadata', r, { once: true })));
       this.step = 'corners';
       this.status = '';
+      this.openedAt = performance.now();
+      this.startSearch();
     } catch (err) {
       this.error = err && err.name === 'NotAllowedError'
         ? 'Camera access was blocked. Allow the camera for this app and try again.'
@@ -111,6 +114,8 @@ export class CaptureSession {
     const box = this.overlay.getBoundingClientRect();
     const x = ((e.clientX - box.left) / box.width) * this.video.videoWidth;
     const y = ((e.clientY - box.top) / box.height) * this.video.videoHeight;
+    this.searching = false;
+    this.candidate = null;
     this.corners.push([x, y]);
     this.status = '';
     if (this.corners.length === 4) this.calibrate();
@@ -131,6 +136,7 @@ export class CaptureSession {
       this.corners = [];
       this.H = null;
       this.status = 'Those corners didn’t form a board. Tap them again.';
+      this.startSearch();
       return;
     }
     const start = occupancy(this.chess);
@@ -140,6 +146,8 @@ export class CaptureSession {
     this.reader.train(features, start);
     this.reading = this.reader.read(features, start);
     this.updateCheck();
+    this.calibratedAt = performance.now();
+    this.lastAutoLearn = this.calibratedAt;
     if (this.memory) this.memory.set('captureCorners', this.corners.map(([x, y]) => [x / this.video.videoWidth, y / this.video.videoHeight]));
     this.step = 'confirm';
     // Keep reading while you check the setup, so fixes show straight away.
@@ -180,6 +188,47 @@ export class CaptureSession {
     this.reading = null;
     this.step = 'corners';
     this.stopLoop();
+    this.startSearch();
+    this.draw();
+    this.onChange();
+  }
+
+  // Look for the board by itself while waiting for corners. Two frames that
+  // agree make a lock; tapping corners pauses the search.
+  startSearch() {
+    this.candidate = null;
+    this.agreeing = 0;
+    this.searching = true;
+    clearTimeout(this.searchTimer);
+    const loop = () => {
+      if (this.step !== 'corners' || !this.searching) return;
+      this.search();
+      this.searchTimer = setTimeout(loop, 300);
+    };
+    this.searchTimer = setTimeout(loop, 300);
+  }
+
+  search() {
+    if (this.corners.length || !this.video.videoWidth) return;
+    const { img, scale } = this.frame();
+    const found = detectBoard(img);
+    if (!found) {
+      if (this.candidate) { this.candidate = null; this.draw(); this.onChange(); }
+      return;
+    }
+    const corners = found.corners.map(([x, y]) => [x / scale, y / scale]);
+    const prev = this.candidate;
+    const agree = prev && Math.max(...corners.map(([x, y], i) => Math.hypot(x - prev[i][0], y - prev[i][1]))) < 6 / scale;
+    this.agreeing = agree ? this.agreeing + 1 : 0;
+    this.candidate = corners;
+    // Cameras spend their first second or so settling exposure and colour, so
+    // wait for that and for the board to hold still over a few frames.
+    if (this.agreeing >= 2 && performance.now() - (this.openedAt || 0) > 1500) {
+      this.searching = false;
+      this.corners = corners;
+      this.calibrate();
+      this.status = '';
+    }
     this.draw();
     this.onChange();
   }
@@ -322,6 +371,14 @@ export class CaptureSession {
     const occ = occupancy(this.chess);
     this.reading = this.reader.read(features, occ);
     if (this.step === 'confirm') {
+      // Just after locking on the camera may still be settling: if squares
+      // read wrong, learn the colours again from a newer frame.
+      const now = performance.now();
+      if (this.check && this.check.wrong && now - this.calibratedAt < 3000 && now - this.lastAutoLearn > 600) {
+        this.lastAutoLearn = now;
+        this.reader.train(features, occ);
+        this.reading = this.reader.read(features, occ);
+      }
       const changed = this.updateCheck();
       this.draw();
       if (changed) this.onChange();
@@ -389,6 +446,8 @@ export class CaptureSession {
 
   close() {
     this.stopLoop();
+    this.searching = false;
+    clearTimeout(this.searchTimer);
     if (this.wakeLock) this.wakeLock.release().catch(() => {});
     this.wakeLock = null;
     if (typeof speechSynthesis !== 'undefined') try { speechSynthesis.cancel(); } catch { /* no speech */ }
@@ -457,6 +516,15 @@ export class CaptureSession {
     const s = vw / 640;
     ctx.lineWidth = 3 * s;
     ctx.font = `${Math.round(22 * s)}px sans-serif`;
+    if (!this.H && this.candidate && this.step === 'corners') {
+      ctx.strokeStyle = 'rgba(232, 178, 58, 0.95)';
+      ctx.lineWidth = 4 * s;
+      ctx.beginPath();
+      this.candidate.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+      ctx.closePath();
+      ctx.stroke();
+      ctx.lineWidth = 3 * s;
+    }
     if (!this.H) {
       this.corners.forEach(([x, y], i) => {
         ctx.fillStyle = '#19995e';

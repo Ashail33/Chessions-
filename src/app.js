@@ -765,10 +765,15 @@ function capturePanel() {
   if (c.error) return `<article class="empty-card"><h2>Camera unavailable</h2><p>${esc(c.error)}</p><button type="button" class="btn wide" data-action="captureCancel">Back</button></article>`;
   if (c.step === 'camera') return '<article class="verdict"><p class="v-line"><span class="thinking">Starting the camera</span></p></article><div id="cam-slot"></div>';
   if (c.step === 'corners') {
-    return `<article class="verdict"><p class="v-line">Set up the pieces in the starting position, then tap the four corners of the board (${c.corners.length} of 4).</p>
-      <p class="small muted">Any order is fine: the pieces show which side is White. Keep all 64 squares in view. Once set, the grid locks on and follows the board, so you can hold the phone.</p>${c.status ? `<p class="small neg">${esc(c.status)}</p>` : ''}</article>
+    const finding = c.searching && !c.corners.length;
+    const head = finding
+      ? `<p class="v-line"><span class="thinking">${c.candidate ? 'Found the board, holding still' : 'Looking for the board'}</span></p>
+      <p class="small muted">Set up the pieces in the starting position and point the camera at the board, with all 64 squares in view. It finds the board by itself. If it doesn’t, tap the four corners.</p>`
+      : `<p class="v-line">Tap the four corners of the board (${c.corners.length} of 4).</p>
+      <p class="small muted">Any order is fine: the pieces show which side is White. Keep all 64 squares in view.</p>`;
+    return `<article class="verdict">${head}${c.status ? `<p class="small neg">${esc(c.status)}</p>` : ''}</article>
       <div id="cam-slot"></div>
-      <div class="action-bar">${c.lastCorners && !c.corners.length ? '<button type="button" class="btn primary" data-action="captureLastCorners">Same spot as last time</button>' : ''}<button type="button" class="btn" data-action="captureRedo" ${c.corners.length ? '' : 'disabled'}>Redo corners</button><button type="button" class="btn" data-action="captureCancel">Cancel</button></div>`;
+      <div class="action-bar">${c.lastCorners && !c.corners.length ? '<button type="button" class="btn" data-action="captureLastCorners">Same spot as last time</button>' : ''}${c.corners.length ? '<button type="button" class="btn" data-action="captureRedo">Start again</button>' : ''}<button type="button" class="btn" data-action="captureCancel">Cancel</button></div>`;
   }
   if (c.step === 'confirm') {
     const k = c.check || { ok: false, wrong: 0, separation: 0 };
@@ -781,7 +786,7 @@ function capturePanel() {
       <div class="field"><span class="label">You are playing</span>${chipGroup('captureMe', [{ value: 'w', text: 'White' }, { value: 'b', text: 'Black' }, { value: 'none', text: 'Just recording' }], state.captureMe)}</div></article>
       <div class="chips rec-toggles">${camViewChip(c)}</div>
       <div id="cam-slot"></div>
-      <div class="action-bar"><button type="button" class="btn primary" data-action="captureStart">Start recording</button><button type="button" class="btn" data-action="captureRecheck">Re-learn colours</button><button type="button" class="btn" data-action="captureRedo">Redo corners</button></div>`;
+      <div class="action-bar"><button type="button" class="btn primary" data-action="captureStart">Start recording</button><button type="button" class="btn" data-action="captureRecheck">Re-learn colours</button><button type="button" class="btn" data-action="captureRedo">Find again</button></div>`;
   }
   const hist = c.chess.history({ verbose: true });
   const plies = hist.map((m, i) => ({ san: m.san, color: m.color, fullmove: Math.floor(i / 2) + 1 }));

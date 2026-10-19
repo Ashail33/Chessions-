@@ -7,7 +7,7 @@ export const CORNERS = [[90, 40], [410, 52], [455, 372], [36, 360]]; // a8, h8, 
 // realistic: no outlines, cream pieces close to the light squares, pieces
 // off-centre and tall (leaning into the square behind), camera shake of
 // `shake` pixels and exposure drift.
-export function renderPosition(chess, { width = 480, height = 400, hand = null, seed = 1, light = 1, realistic = false, shake = 0, corners = CORNERS } = {}) {
+export function renderPosition(chess, { width = 480, height = 400, hand = null, seed = 1, light = 1, realistic = false, shake = 0, corners = CORNERS, clutter = false } = {}) {
   let s0 = seed * 7919 + 13;
   const jit = () => ((s0 = (s0 * 16807) % 2147483647) / 2147483647 - 0.5) * 2 * shake;
   const dx0 = jit();
@@ -21,6 +21,13 @@ export function renderPosition(chess, { width = 480, height = 400, hand = null, 
   for (let py = 0; py < height; py++) {
     for (let px = 0; px < width; px++) {
       let c = [70, 60, 55]; // table
+      // A cluttered table: wood grain stripes and a few bright objects with corners.
+      if (clutter) {
+        const stripe = Math.floor((px + py * 0.3) / 9) % 2;
+        c = stripe ? [92, 74, 60] : [64, 52, 44];
+        if (px > 6 && px < 60 && py > 300 && py < 380) c = (Math.floor(px / 12) + Math.floor(py / 12)) % 2 ? [230, 230, 230] : [30, 30, 30];
+        if (px > 420 && px < 476 && py > 10 && py < 70) c = [200, 40, 40];
+      }
       const [bx, by] = project(toBoard, px, py);
       if (bx >= 0 && bx < 8 && by >= 0 && by < 8) {
         const f = Math.floor(bx);
