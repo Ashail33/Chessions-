@@ -4,7 +4,8 @@
 
 import { Chess } from '../vendor/chess.js';
 import { detectBoard, relocate } from './detect.js';
-import { boardHomography, readFeatures, orientCorners, BoardReader, MoveWatcher, GridTracker, occupancy, squarePoint, project } from './vision.js';
+import { classifySquares } from './squarenet.js';
+import { boardHomography, readFeatures, orientCorners, BoardReader, MoveWatcher, GridTracker, occupancy, squarePoint, project, LOW_CAMERA } from './vision.js';
 
 export const CORNER_ORDER = ['a8', 'h8', 'h1', 'a1'];
 const SAMPLE_WIDTH = 480;
@@ -143,7 +144,7 @@ export class CaptureSession {
       return;
     }
     const start = occupancy(this.chess);
-    const features = readFeatures(img, this.tracker.H);
+    const features = this.addNet(readFeatures(img, this.tracker.H), img, this.tracker.H, true);
     this.lastImg = img;
     this.reader = new BoardReader();
     this.reader.train(features, start);
@@ -198,7 +199,7 @@ export class CaptureSession {
   recheck() {
     if (!this.H) return;
     const start = occupancy(this.chess);
-    const features = this.features();
+    const features = this.features(true);
     if (!features) return;
     this.reader.train(features, start);
     this.reading = this.reader.read(features, start);
@@ -286,7 +287,7 @@ export class CaptureSession {
 
   // Follow the board into the current frame and read it. Null while the
   // board is lost.
-  features() {
+  features(fresh = false) {
     if (!this.video.videoWidth || !this.tracker) return null;
     const { img, scale } = this.frame();
     let r = this.tracker.track(img);
@@ -297,6 +298,7 @@ export class CaptureSession {
       if (corners) {
         this.tracker.reset(img, corners);
         r = { H: this.tracker.H, locked: true };
+        fresh = true;
       }
     }
     if (r.locked) this.lostTicks = 0;
@@ -304,14 +306,37 @@ export class CaptureSession {
     this.lastImg = img;
     // The grid in video pixels, for drawing.
     const Hs = r.H;
+    this.lastHs = Hs;
     this.H = [Hs[0] / scale, Hs[1] / scale, Hs[2] / scale, Hs[3] / scale, Hs[4] / scale, Hs[5] / scale, Hs[6], Hs[7], Hs[8]];
     this.drawRect(img, Hs);
-    return r.locked ? readFeatures(img, Hs) : null;
+    return r.locked ? this.addNet(readFeatures(img, Hs), img, Hs, fresh) : null;
+  }
+
+  // Attach the trained square model's reading (squarenet.js). It is the
+  // slowest step on a phone, so it runs as often as the phone keeps up with
+  // and the last reading is reused in between (a move needs a few agreeing
+  // frames anyway).
+  addNet(features, img, H, fresh = false) {
+    const now = performance.now();
+    if (fresh || !this.net || now - this.netAt >= Math.max(150, 2.5 * (this.netMs || 0))) {
+      try {
+        this.net = classifySquares(img, H);
+      } catch {
+        this.net = null;
+      }
+      this.netAt = performance.now();
+      this.netMs = this.netAt - now;
+      this.netImg = img;
+    }
+    if (this.net) features.net = this.net;
+    return features;
   }
 
   // Learn from a frame whose position is known, keeping half of what was learnt
   // before, and take it as the tracker's new reference.
-  relearn(features = this.features()) {
+  relearn(features = this.features(true)) {
+    // Learn from the model's reading of this very frame, not a reused one.
+    if (features && this.netImg !== this.lastImg && this.lastHs) this.addNet(features, this.lastImg, this.lastHs, true);
     if (features) {
       this.reader.train(features, occupancy(this.chess), 0.5);
       if (this.locked && this.lastImg) this.tracker.refresh(this.lastImg);
@@ -415,6 +440,10 @@ export class CaptureSession {
     const occ = occupancy(this.chess);
     this.reading = this.reader.read(features, occ);
     this.smooth(this.reading.labels);
+    // Too low a camera: tall pieces hide the squares behind them. (A little
+    // hysteresis so the hint doesn't flicker.)
+    const low = this.lowCamera ? features.aspect < LOW_CAMERA + 0.04 : features.aspect < LOW_CAMERA;
+    if (low !== this.lowCamera) { this.lowCamera = low; this.onChange(); }
     if (this.step === 'confirm') {
       // Just after locking on the camera may still be settling: if squares
       // read wrong, learn the colours again from a newer frame.

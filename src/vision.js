@@ -222,6 +222,14 @@ const NF = 6; // features per square
 // the best one is a disagreement.
 const UNKNOWN = 150;
 const WRONG = 9;
+// Squares squashed to under this along the view (see readFeatures' aspect):
+// the camera is low enough for tall pieces to hide the squares behind them.
+export const LOW_CAMERA = 0.8;
+// The trained square model (squarenet.js), when its answer is attached to the
+// features as `net`: its say is up to this many times -ln p per square, cut
+// off at NET_CAP so one very sure square can't outweigh everything.
+const NET_WEIGHT = 2;
+const NET_CAP = 10;
 const READ_GRID = 6;
 const READ_INSET = 0.25;
 const lumOf = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
@@ -294,7 +302,13 @@ export function readFeatures(img, H) {
     valid[sq] = q.n > READ_GRID * READ_GRID * 0.6 ? 1 : 0;
     feat.set([q.mean, q.sd, q.cr, q.cb, q.q10, q.q90], sq * NF);
   });
-  return { feat, valid };
+  // How squarely the camera looks at the board: about 1 from straight above,
+  // smaller the lower the camera (squares squashed along the view).
+  const [cx, cy] = project(H, 4, 4);
+  const [ax, ay] = project(H, 4 + ux * 0.5, 4 + uy * 0.5);
+  const [bx, by] = project(H, 4 + Math.abs(uy) * 0.5, 4 + Math.abs(ux) * 0.5);
+  const aspect = Math.hypot(ax - cx, ay - cy) / (Math.hypot(bx - cx, by - cy) || 1);
+  return { feat, valid, far: [ux, uy], aspect };
 }
 
 // Light is rarely even across a board (a window, a lamp), and exposure
@@ -302,7 +316,7 @@ export function readFeatures(img, H) {
 // measure the scale on squares that are empty (in the position we believe is
 // on the board) against what they should look like, fit a smooth field across
 // the board to those, and undo it square by square.
-function normalise({ feat, valid }, occ, model, emptyRef) {
+function normalise({ feat, valid, far, aspect }, occ, model, emptyRef) {
   // What an empty square should look like: its own remembered look, else the
   // learnt empty square of its colour, else (first frame) the median of this
   // frame's empty squares of that colour.
@@ -325,7 +339,7 @@ function normalise({ feat, valid }, occ, model, emptyRef) {
     const k = field((sq & 7) - 3.5, (sq >> 3) - 3.5);
     for (let i = 0; i < NF; i++) out[sq * NF + i] = feat[sq * NF + i] * k;
   }
-  return { feat: out, valid };
+  return { feat: out, valid, far, aspect };
 }
 
 // Smooth scale across the board, r = a + b x + c y + d xy, fitted to the
@@ -412,6 +426,27 @@ export class BoardReader {
   // blend < 1 mixes with what was learnt before (lighting drift).
   train(features, occ, blend = 1) {
     const { feat, valid } = normalise(features, occ, this.model, this.emptyRef);
+    // How every square looked in this known position, to tell later which
+    // squares a move changed.
+    this.lastLook = feat.slice();
+    this.lastValid = valid.slice();
+    // How far to trust the trained model on this board, in this view: what
+    // share of the squares of this known position it gets right. It was
+    // trained on real photos and reads them about 99% right; on a board unlike
+    // any it saw it may do worse, and then the colours decide alone.
+    if (features.net) {
+      let right = 0;
+      let n = 0;
+      for (let sq = 0; sq < 64; sq++) {
+        if (!valid[sq]) continue;
+        const lp = features.net.subarray(sq * 3, sq * 3 + 3);
+        const best = lp[0] >= lp[1] && lp[0] >= lp[2] ? 0 : lp[1] >= lp[2] ? 1 : 2;
+        n++;
+        if (OCC[best] === occ[sq]) right++;
+      }
+      const trust = n ? Math.min(1, Math.max(0, (right / n - 0.9) / 0.07)) : 0;
+      this.netTrust = this.netTrust === undefined || blend >= 1 ? trust : blend * trust + (1 - blend) * this.netTrust;
+    }
     for (let sq = 0; sq < 64; sq++) {
       if (occ[sq] !== 'e' || !valid[sq]) continue;
       const now = feat.slice(sq * NF, sq * NF + NF);
@@ -469,10 +504,13 @@ export class BoardReader {
   // Distance of every square to each occupant (64 x 3), and the best reading.
   // occ: the position believed to be on the board, for exposure.
   read(features, occ) {
-    const { feat, valid } = normalise(features, occ, this.model, this.emptyRef);
+    const { feat, valid, far, aspect } = normalise(features, occ, this.model, this.emptyRef);
     const dist = new Float32Array(64 * 3);
     const labels = new Array(64);
     const unknown = new Uint8Array(64);
+    const change = changeSince(feat, valid, this.lastLook, this.lastValid);
+    const netWeight = NET_WEIGHT * (this.netTrust || 0);
+    const net = features.net && netWeight > 0 ? features.net : null;
     for (let sq = 0; sq < 64; sq++) {
       const classes = this.model[isLight(sq) ? 1 : 0];
       let best = 0;
@@ -488,6 +526,7 @@ export class BoardReader {
           for (let i = 0; i < NF; i++) e += ((feat[sq * NF + i] - own[i]) / c.sd[i]) ** 2;
           d = Math.min(d, e);
         }
+        if (net) d += netWeight * Math.min(NET_CAP, -net[sq * 3 + o]);
         dist[sq * 3 + o] = d;
         if (dist[sq * 3 + o] < dist[sq * 3 + best]) best = o;
       }
@@ -495,7 +534,7 @@ export class BoardReader {
       // Nothing like any learnt case: a hand, a shadow or a glare.
       unknown[sq] = !valid[sq] || dist[sq * 3 + best] > UNKNOWN ? 1 : 0;
     }
-    return { dist, labels, unknown };
+    return { dist, labels, unknown, change, far, aspect };
   }
 
   // Cost of believing the board holds occ: summed excess distance over the
@@ -514,6 +553,29 @@ export class BoardReader {
     }
     return { cost, wrong };
   }
+}
+
+// How much each square changed since the last known position, feature by
+// feature, in units of how much that feature moved this frame across all
+// squares (most squares didn't change, so that is the noise). Used only to
+// choose between moves the colours can't tell apart, e.g. a cream piece
+// landing on one cream square or another.
+function changeSince(feat, valid, last, lastValid) {
+  const change = new Float32Array(64);
+  if (!last) return change;
+  const noise = new Float32Array(NF);
+  for (let i = 0; i < NF; i++) {
+    const xs = [];
+    for (let sq = 0; sq < 64; sq++) if (valid[sq] && lastValid[sq]) xs.push(Math.abs(feat[sq * NF + i] - last[sq * NF + i]));
+    noise[i] = Math.max(1.5, xs.length ? quantile(xs.sort((a, b) => a - b), 0.5) : 1.5);
+  }
+  for (let sq = 0; sq < 64; sq++) {
+    if (!valid[sq] || !lastValid[sq]) continue;
+    let d = 0;
+    for (let i = 0; i < NF; i++) d += ((feat[sq * NF + i] - last[sq * NF + i]) / noise[i]) ** 2;
+    change[sq] = Math.sqrt(d / NF);
+  }
+  return change;
 }
 
 // Occupancy after a move, without needing a chess engine.
@@ -536,7 +598,11 @@ export function rankByReading(reading, occ, moves) {
   for (const m of moves) {
     const key = m.from + m.to;
     if (seen.has(key) && m.promotion !== 'q') continue;
-    seen.set(key, { move: m, ...BoardReader.cost(reading, occupancyAfter(occ, m)) });
+    const after = occupancyAfter(occ, m);
+    // How strongly the squares this move changes did change.
+    let moved = 0;
+    if (reading.change) for (let sq = 0; sq < 64; sq++) if (after[sq] !== occ[sq]) moved += reading.change[sq];
+    seen.set(key, { move: m, moved, ...BoardReader.cost(reading, after) });
   }
   const ranked = [...seen.values()].sort((a, b) => a.cost - b.cost);
   return { none: BoardReader.cost(reading, occ), ranked };
@@ -562,26 +628,61 @@ export class MoveWatcher {
     if (blocked) { this.reset(); return { state: 'blocked' }; }
     const { none, ranked } = rankByReading(reading, occ, moves);
     const [top, second] = ranked;
-    let key = 'none';
-    let clear = false;
-    if (top && none.wrong >= 1 && top.cost + 2 * WRONG < none.cost) {
-      key = top.move.from + top.move.to;
-      // Clearly better than staying put and than the runner-up.
-      clear = top.wrong <= 1 && (!second || second.cost - top.cost > 2 * WRONG);
-    } else if (none.wrong <= 1) {
+    // Moves the colours can't tell apart (within a margin of the best): the
+    // one whose squares actually changed wins, if clearly.
+    if (top && second && second.cost - top.cost <= 2 * WRONG) {
+      const close = ranked.filter((c) => c.cost - top.cost <= 2 * WRONG).sort((a, b) => b.moved - a.moved);
+      if (close.length > 1 && close[0].moved > 1.6 * close[1].moved && close[0].moved > 4) {
+        ranked.splice(ranked.indexOf(close[0]), 1);
+        ranked.unshift(close[0]);
+        ranked[0].decided = true;
+      }
+    }
+    const best = ranked[0];
+    const next = ranked[1];
+    // A move's squares changed strongly, far more than any other move's: that
+    // counts even when the colours can't tell it from nothing happening (a
+    // black piece onto a dark square, say).
+    const strong = best && best.moved >= 20 && (!next || best.moved > 2 * next.moved) && best.cost <= none.cost + WRONG;
+    const likely = best && ((none.wrong >= 1 && best.cost + 2 * WRONG < none.cost) || strong);
+    // Squares of one move changed clearly, even if not enough to be sure:
+    // don't call the board still, so it asks rather than miss the move.
+    const hint = best && best.moved >= 12 && (!next || best.moved > 2 * next.moved);
+    if (!likely && !hint && none.wrong <= 1) {
       this.reset();
       return { state: 'still' };
     }
+    // Something changed. Is it clearly one move?
+    let key = 'unclear';
+    let clear = false;
+    if (likely) {
+      key = best.move.from + best.move.to;
+      clear = best.wrong <= 1 && (best.decided || strong || !next || next.cost - best.cost > 2 * WRONG);
+      // From a low camera a tall piece covers the square behind it, so two
+      // moves to squares one behind the other (e5 or e6) can look alike. With
+      // the camera low, always ask; otherwise only take one far ahead.
+      const twin = ranked.slice(1, 4).find((c) => behindEachOther(best.move, c.move, reading.far) && c.cost - best.cost < 8 * WRONG);
+      if (clear && twin && (reading.aspect < LOW_CAMERA || twin.cost - best.cost < 4 * WRONG)) clear = false;
+    }
     if (key === this.lastKey) this.count++;
     else { this.lastKey = key; this.count = 1; }
-    if (this.count < this.stableReads) return { state: 'waiting' };
-    if (clear) { this.reset(); return { state: 'move', move: top.move }; }
+    // However the candidates shuffle, don't keep the player waiting: ask.
     this.unclearSince ??= now;
+    if (clear && this.count >= this.stableReads) { this.reset(); return { state: 'move', move: best.move }; }
     if (now - this.unclearSince < this.askAfterMs) return { state: 'waiting' };
-    this.unclearSince = null;
-    this.count = 0;
+    this.reset();
     return { state: 'ask', candidates: ranked.slice(0, 4).map((c) => ({ ...c, score: -c.cost })) };
   }
+}
+
+// Same piece, landing on squares one behind the other as the camera sees it.
+function behindEachOther(a, b, far) {
+  if (!far || a.from !== b.from) return false;
+  const [ux, uy] = far;
+  const df = b.to.charCodeAt(0) - a.to.charCodeAt(0);
+  const dr = b.to.charCodeAt(1) - a.to.charCodeAt(1);
+  // In board terms, "away from the camera" is file +ux, rank -uy.
+  return Math.abs(df) === Math.abs(ux) && Math.abs(dr) === Math.abs(uy) && (df === ux && dr === -uy || df === -ux && dr === uy);
 }
 
 // ---------- following the board ----------

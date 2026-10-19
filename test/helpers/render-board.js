@@ -12,10 +12,22 @@ export const CORNERS = [[90, 40], [410, 52], [455, 372], [36, 360]]; // a8, h8, 
 // sensor noise.
 // wood: each square its own grain and shade, and pieces casting shadows on
 // the squares beside them (what a real wooden board under a lamp looks like).
-export function renderPosition(chess, { width = 480, height = 400, hand = null, seed = 1, light = 1, realistic = false, shake = 0, corners = CORNERS, clutter = false, harsh = false, wood = false } = {}) {
+// overhead: the camera looks straight down, so a piece is a round footprint in
+// the middle of its square (a base with a smaller, lighter or darker top),
+// nothing leaning over its neighbours.
+export function renderPosition(chess, { width = 480, height = 400, hand = null, seed = 1, light = 1, realistic = false, shake = 0, corners = CORNERS, clutter = false, harsh = false, wood = false, overhead = false } = {}) {
   if (wood) harsh = true;
   if (harsh) realistic = true;
-  const lean = harsh ? 1.15 : 0.75;
+  // How far a piece's top reaches up the picture, in squares: its height
+  // times how low the camera is. The camera's angle comes from how squashed
+  // the board is (about 1 from straight above).
+  const [tl, tr, br, bl] = corners;
+  const across = (Math.hypot(tr[0] - tl[0], tr[1] - tl[1]) + Math.hypot(br[0] - bl[0], br[1] - bl[1])) / 2;
+  const depth = (Math.hypot(bl[0] - tl[0], bl[1] - tl[1]) + Math.hypot(br[0] - tr[0], br[1] - tr[1])) / 2;
+  const sinA = Math.min(1, depth / across);
+  const tilt = Math.sqrt(Math.max(0, 1 - sinA * sinA)) / sinA;
+  const HEIGHT = { p: 0.7, n: 0.9, b: 0.95, r: 0.8, q: 1.2, k: 1.4 };
+  const leanOf = (pc) => (harsh ? HEIGHT[pc.type] * tilt + 0.1 : 0.75);
   let s0 = seed * 7919 + 13;
   const jit = () => ((s0 = (s0 * 16807) % 2147483647) / 2147483647 - 0.5) * 2 * shake;
   const dx0 = jit();
@@ -55,9 +67,19 @@ export function renderPosition(chess, { width = 480, height = 400, hand = null, 
           if (left && Math.hypot(bx - f - 0.1, by - rFromTop - 0.5) < 0.38) c = c.map((v) => v * 0.72);
         }
         const piece = grid[rFromTop][f];
-        if (realistic) {
+        if (overhead) {
+          const pc = grid[rFromTop][f];
+          if (pc) {
+            const h = ((rFromTop * 8 + f) * 2654435761) % 1000 / 1000;
+            const d = Math.hypot(bx - f - 0.5 - (h - 0.5) * 0.16, by - rFromTop - 0.5 - (((h * 7) % 1) - 0.5) * 0.16);
+            if (d < 0.36) {
+              const top = d < 0.18;
+              c = pc.color === 'w' ? (top ? [240, 232, 210] : [222, 212, 186]) : (top ? [70, 62, 58] : [48, 42, 38]);
+            }
+          }
+        } else if (realistic) {
           // Check this square's piece and the one in front of it (a tall piece leans back).
-          for (const [rr, behind] of [[rFromTop, 0], [rFromTop + 1, 1], [rFromTop + 2, 2]]) {
+          for (const [rr, behind] of [[rFromTop, 0], [rFromTop + 1, 1], [rFromTop + 2, 2], [rFromTop + 3, 3]]) {
             const pc = rr < 8 ? grid[rr][f] : null;
             if (!pc) continue;
             const h = ((rr * 8 + f) * 2654435761) % 1000 / 1000;
@@ -67,7 +89,7 @@ export function renderPosition(chess, { width = 480, height = 400, hand = null, 
             const py0 = by - rr - 0.5 - oy;
             // base disc plus a body stretching up the image
             const inBase = Math.hypot(px0, py0) < 0.3;
-            const inBody = Math.abs(px0) < 0.17 && py0 < 0 && py0 > -lean;
+            const inBody = Math.abs(px0) < 0.17 && py0 < 0 && py0 > -leanOf(pc);
             if ((behind === 0 && (inBase || inBody)) || (behind > 0 && inBody)) {
               const shade = 1 - 0.18 * Math.max(0, px0 / 0.3);
               c = pc.color === 'w' ? [232 * shade, 222 * shade, 196 * shade] : [58 * shade, 50 * shade, 46 * shade];
