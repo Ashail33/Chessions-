@@ -158,6 +158,18 @@ export class CaptureSession {
     this.timer = setInterval(() => this.tick(), 200);
   }
 
+  // The dots show what the last few readings agree on, so one noisy frame
+  // can't flash a piece that isn't there.
+  smooth(labels) {
+    this.recent = [...(this.recent || []).slice(-2), labels];
+    this.shown = labels.map((l, sq) => {
+      const votes = {};
+      for (const r of this.recent) votes[r[sq]] = (votes[r[sq]] || 0) + 1;
+      const top = Object.entries(votes).sort((a, b) => b[1] - a[1])[0];
+      return top[1] > 1 ? top[0] : l;
+    });
+  }
+
   // Just after locking on, while wrong squares may still be the camera settling.
   get settling() {
     return !!this.check && this.check.wrong > 0 && performance.now() - (this.calibratedAt || 0) < 3000;
@@ -402,6 +414,7 @@ export class CaptureSession {
     }
     const occ = occupancy(this.chess);
     this.reading = this.reader.read(features, occ);
+    this.smooth(this.reading.labels);
     if (this.step === 'confirm') {
       // Just after locking on the camera may still be settling: if squares
       // read wrong, learn the colours again from a newer frame.
@@ -444,6 +457,7 @@ export class CaptureSession {
     // The app shows the last move played while it watches for the next one.
     this.status = 'Watching the board';
     this.lastPlayed = move;
+    this.recent = [];
     this.relearn(features);
     this.say(spokenMove(move.san));
     if (navigator.vibrate) try { navigator.vibrate(40); } catch { /* not supported */ }
@@ -465,6 +479,7 @@ export class CaptureSession {
     this.chess.undo();
     this.candidates = null;
     this.lastPlayed = null;
+    this.recent = [];
     this.watcher.reset();
     this.status = 'Took back the last move. Put the pieces back on the board.';
     this.onChange();
@@ -514,7 +529,7 @@ export class CaptureSession {
     if (!this.reading) return;
     for (let sq = 0; sq < 64; sq++) {
       const [x, y] = at((sq & 7) + 0.5, 7 - (sq >> 3) + 0.5);
-      const label = this.reading.labels[sq];
+      const label = (this.shown || this.reading.labels)[sq];
       const wrong = this.step === 'confirm' && this.check && this.check.wrongSquares.includes(sq);
       if (this.reading.unknown[sq] || wrong) {
         ctx.strokeStyle = '#ff5c69';
@@ -592,7 +607,7 @@ export class CaptureSession {
       if (this.reading) {
         for (let sq = 0; sq < 64; sq++) {
           const [x, y] = squarePoint(this.H, sq);
-          const label = this.reading.labels[sq];
+          const label = (this.shown || this.reading.labels)[sq];
           const wrong = this.step === 'confirm' && this.check && this.check.wrongSquares.includes(sq);
           if (this.reading.unknown[sq] || wrong) {
             ctx.strokeStyle = '#ff5c69';

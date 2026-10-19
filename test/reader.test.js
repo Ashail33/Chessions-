@@ -84,3 +84,28 @@ test('a still board is not a move', () => {
     assert.equal(r.state, 'still');
   }
 });
+
+test('empty squares stay empty on a wooden board in uneven light', () => {
+  // Grain and a shade of its own on every square, shadows beside pieces,
+  // light brighter towards one side, blur and noise.
+  const chess = new Chess();
+  let seed = 1;
+  const frame = () => readFeatures(renderPosition(chess, { wood: true, seed: ++seed, light: 0.95 + 0.1 * Math.sin(seed), shake: 1 }), H);
+  const reader = new BoardReader();
+  reader.train(frame(), occupancy(chess));
+  let falsePieces = 0;
+  let empties = 0;
+  for (const san of ['e4', 'e5', 'Nf3', 'Nc6', 'Bc4', 'Bc5', 'O-O', 'Nf6', 'd3', 'd6', 'Bg5', 'h6', 'Bxf6', 'Qxf6']) {
+    chess.move(san);
+    const occ = occupancy(chess);
+    let f;
+    for (let i = 0; i < 4; i++) {
+      f = frame();
+      const r = reader.read(f, occ);
+      r.labels.forEach((l, k) => { if (occ[k] === 'e') { empties++; if (l !== 'e') falsePieces++; } });
+    }
+    reader.train(f, occ, 0.5);
+  }
+  // Before the light field and each square's own empty look: about 3%.
+  assert.ok(falsePieces / empties < 0.012, `${(100 * falsePieces / empties).toFixed(1)}% of empty squares read as pieces`);
+});

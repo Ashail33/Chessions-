@@ -10,7 +10,10 @@ export const CORNERS = [[90, 40], [410, 52], [455, 372], [36, 360]]; // a8, h8, 
 // harsh: what a real phone sees more of: a wooden border round the squares,
 // taller pieces (more of the square behind hidden), uneven light, blur and
 // sensor noise.
-export function renderPosition(chess, { width = 480, height = 400, hand = null, seed = 1, light = 1, realistic = false, shake = 0, corners = CORNERS, clutter = false, harsh = false } = {}) {
+// wood: each square its own grain and shade, and pieces casting shadows on
+// the squares beside them (what a real wooden board under a lamp looks like).
+export function renderPosition(chess, { width = 480, height = 400, hand = null, seed = 1, light = 1, realistic = false, shake = 0, corners = CORNERS, clutter = false, harsh = false, wood = false } = {}) {
+  if (wood) harsh = true;
   if (harsh) realistic = true;
   const lean = harsh ? 1.15 : 0.75;
   let s0 = seed * 7919 + 13;
@@ -39,6 +42,18 @@ export function renderPosition(chess, { width = 480, height = 400, hand = null, 
         const f = Math.floor(bx);
         const rFromTop = Math.floor(by);
         c = (f + rFromTop) % 2 === 0 ? [215, 205, 180] : [120, 145, 110];
+        if (wood) {
+          // Per-square shade and grain, fixed for the square.
+          const h = (((rFromTop * 8 + f) * 2654435761) >>> 0) / 4294967296;
+          const tint = 0.9 + 0.2 * h;
+          const ang = h * 6.28;
+          const u = (bx - f) * Math.cos(ang) + (by - rFromTop) * Math.sin(ang);
+          const grain = 1 + 0.07 * Math.sin(u * 40 + h * 20) + 0.04 * Math.sin(u * 97);
+          c = c.map((v) => v * tint * grain);
+          // Shadow from a piece on the square to the left (light from the right).
+          const left = f > 0 ? grid[rFromTop][f - 1] : null;
+          if (left && Math.hypot(bx - f - 0.1, by - rFromTop - 0.5) < 0.38) c = c.map((v) => v * 0.72);
+        }
         const piece = grid[rFromTop][f];
         if (realistic) {
           // Check this square's piece and the one in front of it (a tall piece leans back).

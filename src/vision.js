@@ -297,23 +297,62 @@ export function readFeatures(img, H) {
   return { feat, valid };
 }
 
-// Exposure changes scale every feature together. Measure it on squares that
-// are empty (in the position we believe is on the board), against what the
-// reader learnt for empty squares, and undo it.
-function normalise({ feat, valid }, occ, model) {
-  let scale = 1;
-  if (model) {
-    const ratios = [];
-    for (let sq = 0; sq < 64; sq++) {
-      const ref = model[isLight(sq) ? 1 : 0][0];
-      const lum = feat[sq * NF];
-      if (occ[sq] === 'e' && valid[sq] && ref && lum > 1) ratios.push(ref.mu[0] / lum);
-    }
-    if (ratios.length >= 4) scale = quantile(ratios.sort((a, b) => a - b), 0.5);
+// Light is rarely even across a board (a window, a lamp), and exposure
+// changes from frame to frame. Both scale a square's features together, so
+// measure the scale on squares that are empty (in the position we believe is
+// on the board) against what they should look like, fit a smooth field across
+// the board to those, and undo it square by square.
+function normalise({ feat, valid }, occ, model, emptyRef) {
+  // What an empty square should look like: its own remembered look, else the
+  // learnt empty square of its colour, else (first frame) the median of this
+  // frame's empty squares of that colour.
+  const typeRef = [0, 1].map((t) => {
+    if (model && model[t][0]) return model[t][0].mu[0];
+    const xs = [];
+    for (let sq = 0; sq < 64; sq++) if (occ[sq] === 'e' && valid[sq] && (isLight(sq) ? 1 : 0) === t) xs.push(feat[sq * NF]);
+    return xs.length ? quantile(xs.sort((a, b) => a - b), 0.5) : null;
+  });
+  const pts = [];
+  for (let sq = 0; sq < 64; sq++) {
+    const lum = feat[sq * NF];
+    if (occ[sq] !== 'e' || !valid[sq] || lum <= 1) continue;
+    const ref = emptyRef && emptyRef[sq] ? emptyRef[sq][0] : typeRef[isLight(sq) ? 1 : 0];
+    if (ref) pts.push({ x: (sq & 7) - 3.5, y: (sq >> 3) - 3.5, r: ref / lum });
   }
+  const field = fitField(pts);
   const out = new Float32Array(feat.length);
-  for (let i = 0; i < feat.length; i++) out[i] = feat[i] * scale;
-  return { feat: out, valid, scale };
+  for (let sq = 0; sq < 64; sq++) {
+    const k = field((sq & 7) - 3.5, (sq >> 3) - 3.5);
+    for (let i = 0; i < NF; i++) out[sq * NF + i] = feat[sq * NF + i] * k;
+  }
+  return { feat: out, valid };
+}
+
+// Smooth scale across the board, r = a + b x + c y + d xy, fitted to the
+// empty squares (with one pass dropping outliers, e.g. a hand or a shadow).
+// Too few squares: one scale for the whole board.
+function fitField(pts) {
+  const median = pts.length ? quantile(pts.map((p) => p.r).sort((a, b) => a - b), 0.5) : 1;
+  if (pts.length < 10) return () => median;
+  const solve4 = (ps) => {
+    const N = new Array(4).fill(0).map(() => new Array(4).fill(0));
+    const b = new Array(4).fill(0);
+    for (const p of ps) {
+      const row = [1, p.x, p.y, p.x * p.y];
+      for (let i = 0; i < 4; i++) { b[i] += row[i] * p.r; for (let j = 0; j < 4; j++) N[i][j] += row[i] * row[j]; }
+    }
+    for (let i = 0; i < 4; i++) N[i][i] += 1e-6;
+    try { return solve(N, b); } catch { return null; }
+  };
+  let c = solve4(pts);
+  if (!c) return () => median;
+  const at = (x, y) => c[0] + c[1] * x + c[2] * y + c[3] * x * y;
+  const res = pts.map((p) => Math.abs(p.r - at(p.x, p.y)));
+  const tol = Math.max(0.03, 2.5 * quantile([...res].sort((a, b) => a - b), 0.5));
+  const kept = pts.filter((p, i) => res[i] < tol);
+  if (kept.length >= 10) c = solve4(kept) || c;
+  // Keep the field sensible even where there are no empty squares to go by.
+  return (x, y) => Math.max(median * 0.6, Math.min(median * 1.6, at(x, y)));
 }
 
 // Work out which corner is which from a board set up in the starting
@@ -364,12 +403,22 @@ export function orientCorners(img, taps) {
 export class BoardReader {
   constructor() {
     this.model = null; // per square colour: per occupant { mu, sd }
+    // Each square's own look when empty, learnt whenever it is known to be
+    // empty: wood grain, printed letters or a scuff then can't pass for a piece.
+    this.emptyRef = new Array(64).fill(null);
   }
 
   // Learn the six appearances from a frame whose contents are known.
   // blend < 1 mixes with what was learnt before (lighting drift).
   train(features, occ, blend = 1) {
-    const { feat, valid } = normalise(features, occ, this.model);
+    const { feat, valid } = normalise(features, occ, this.model, this.emptyRef);
+    for (let sq = 0; sq < 64; sq++) {
+      if (occ[sq] !== 'e' || !valid[sq]) continue;
+      const now = feat.slice(sq * NF, sq * NF + NF);
+      const old = this.emptyRef[sq];
+      if (old && blend < 1) for (let i = 0; i < NF; i++) now[i] = blend * now[i] + (1 - blend) * old[i];
+      this.emptyRef[sq] = now;
+    }
     const model = [0, 1].map((t) => {
       const classes = OCC.map((o) => {
         const rows = [];
@@ -420,7 +469,7 @@ export class BoardReader {
   // Distance of every square to each occupant (64 x 3), and the best reading.
   // occ: the position believed to be on the board, for exposure.
   read(features, occ) {
-    const { feat, valid } = normalise(features, occ, this.model);
+    const { feat, valid } = normalise(features, occ, this.model, this.emptyRef);
     const dist = new Float32Array(64 * 3);
     const labels = new Array(64);
     const unknown = new Uint8Array(64);
@@ -432,6 +481,13 @@ export class BoardReader {
         let d = 0;
         if (c) for (let i = 0; i < NF; i++) d += ((feat[sq * NF + i] - c.mu[i]) / c.sd[i]) ** 2;
         else d = 1e6;
+        // Empty: also compare with the square's own empty look.
+        const own = o === 0 && this.emptyRef[sq];
+        if (own && c) {
+          let e = 0;
+          for (let i = 0; i < NF; i++) e += ((feat[sq * NF + i] - own[i]) / c.sd[i]) ** 2;
+          d = Math.min(d, e);
+        }
         dist[sq * 3 + o] = d;
         if (dist[sq * 3 + o] < dist[sq * 3 + best]) best = o;
       }
