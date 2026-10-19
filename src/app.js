@@ -786,7 +786,7 @@ function capturePanel() {
         : k.wrong
         ? `<p class="v-line"><b class="neg">${k.wrong} square${k.wrong === 1 ? ' reads' : 's read'} wrong</b> (ringed in red). Check the grid sits on the squares and every piece is on its starting square. This updates as you fix it; if the light changed, tap Re-learn colours.</p>`
         : '<p class="v-line"><b class="neg">The pieces are hard to tell from the squares.</b> More light, or a steeper angle from above, helps. You can still try.</p>';
-    return `<article class="verdict tone-${k.ok ? 'dominant' : 'passive'}">${note}
+    return `${lowCameraHint(c)}<article class="verdict tone-${k.ok ? 'dominant' : 'passive'}">${note}
       <div class="field"><span class="label">You are playing</span>${chipGroup('captureMe', [{ value: 'w', text: 'White' }, { value: 'b', text: 'Black' }, { value: 'none', text: 'Just recording' }], state.captureMe)}</div></article>
       <div class="chips rec-toggles">${camViewChip(c)}</div>
       <div id="cam-slot"></div>
@@ -805,8 +805,16 @@ function capturePanel() {
     ? `<article class="rec-status rec-ask"><span class="rec-dot" aria-hidden="true"></span><div><b>${esc(c.status)}</b>${c.candidates.length ? `<div class="chips">${c.candidates.map((x, i) => `<button type="button" data-action="capturePick" data-i="${i}">${esc(x.move.san)}</button>`).join('')}</div>` : ''}<span>Or play the move on the board above.</span><button type="button" class="btn small" data-action="captureDismiss">Nothing was played</button></div></article>`
     : recStatus(c);
   const toggles = `<div class="chips rec-toggles"><button type="button" data-action="captureSpeak" aria-pressed="${c.speak}">${c.speak ? 'Saying moves' : 'Moves muted'}</button>${c.showCamera ? camViewChip(c) : ''}<button type="button" data-action="captureCamera" aria-pressed="${c.showCamera}">${c.showCamera ? 'Hide camera' : 'Show camera'}</button></div>`;
-  return `${ask}${moveStrip(plies, plies.length)}${toggles}<div id="cam-slot" ${c.showCamera ? '' : 'hidden'}></div>
+  return `${ask}${lowCameraHint(c)}${moveStrip(plies, plies.length)}${toggles}<div id="cam-slot" ${c.showCamera ? '' : 'hidden'}></div>
     <div class="action-bar"><button type="button" class="btn" data-action="captureUndo" ${hist.length ? '' : 'disabled'}>Undo move</button><button type="button" class="btn primary" data-action="captureFinish">Finish</button></div>`;
+}
+
+// From a low camera tall pieces hide the squares behind them, and moves to
+// squares one behind the other look alike.
+function lowCameraHint(c) {
+  return c.lowCamera
+    ? '<p class="cam-hint"><b>Raise the phone higher.</b> From this low, tall pieces hide the squares behind them. Looking down from higher up reads moves much more reliably.</p>'
+    : '';
 }
 
 // Straightened board view, or the camera as it is.

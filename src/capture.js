@@ -4,7 +4,7 @@
 
 import { Chess } from '../vendor/chess.js';
 import { detectBoard, relocate } from './detect.js';
-import { boardHomography, readFeatures, orientCorners, BoardReader, MoveWatcher, GridTracker, occupancy, squarePoint, project } from './vision.js';
+import { boardHomography, readFeatures, orientCorners, BoardReader, MoveWatcher, GridTracker, occupancy, squarePoint, project, LOW_CAMERA } from './vision.js';
 
 export const CORNER_ORDER = ['a8', 'h8', 'h1', 'a1'];
 const SAMPLE_WIDTH = 480;
@@ -415,6 +415,10 @@ export class CaptureSession {
     const occ = occupancy(this.chess);
     this.reading = this.reader.read(features, occ);
     this.smooth(this.reading.labels);
+    // Too low a camera: tall pieces hide the squares behind them. (A little
+    // hysteresis so the hint doesn't flicker.)
+    const low = this.lowCamera ? features.aspect < LOW_CAMERA + 0.04 : features.aspect < LOW_CAMERA;
+    if (low !== this.lowCamera) { this.lowCamera = low; this.onChange(); }
     if (this.step === 'confirm') {
       // Just after locking on the camera may still be settling: if squares
       // read wrong, learn the colours again from a newer frame.
