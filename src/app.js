@@ -273,10 +273,16 @@ function renderStage() {
     }
   }
 
+  // While recording a board game the overlays are noise: show a plain board.
+  const recording = state.screen === 'play' && !!state.capture;
+  $('share').hidden = recording;
+  $('lens').hidden = recording;
+  $('legend').hidden = recording;
+
   board.render({
     analysis: v.analysis,
     orientation: state.flipped ? other(me) : me,
-    overlay: state.overlay,
+    overlay: recording ? 'none' : state.overlay,
     freedomSide,
     impact: v.assessment ? v.assessment.deltas : null,
     lastMove: v.move ? { from: v.move.from, to: v.move.to } : null,
@@ -759,16 +765,32 @@ function capturePanel() {
   if (c.error) return `<article class="empty-card"><h2>Camera unavailable</h2><p>${esc(c.error)}</p><button type="button" class="btn wide" data-action="captureCancel">Back</button></article>`;
   if (c.step === 'camera') return '<article class="verdict"><p class="v-line"><span class="thinking">Starting the camera</span></p></article><div id="cam-slot"></div>';
   if (c.step === 'corners') {
-    return `<article class="verdict"><p class="v-line">Tap the outer corner of <b class="mono">${c.nextCorner}</b> (${c.corners.length + 1} of 4).</p>
-      <p class="small muted">Hold the phone steady above the board so all 64 squares are visible. Corners in order: a8, h8, h1, a1. a1 is the dark corner on White\u2019s left.</p>${c.status ? `<p class="small neg">${esc(c.status)}</p>` : ''}</article>
+    const finding = c.searching && !c.corners.length;
+    const head = finding
+      ? `<p class="v-line"><span class="thinking">${c.candidate ? 'Found the board, hold still' : c.seeing ? 'Seeing the squares. Keep the whole board in view' : 'Looking for the board'}</span></p>
+      <p class="small muted">Set up the pieces in the starting position and point the camera at the board, with all 64 squares in view. It finds the board by itself. If it doesn’t, tap the four corners.</p>`
+      : `<p class="v-line">Tap the four corners of the board (${c.corners.length} of 4).</p>
+      <p class="small muted">Any order is fine: the pieces show which side is White. Keep all 64 squares in view.</p>`;
+    return `<article class="verdict">${head}${c.status ? `<p class="small neg">${esc(c.status)}</p>` : ''}</article>
       <div id="cam-slot"></div>
-      <div class="action-bar"><button type="button" class="btn" data-action="captureRedo" ${c.corners.length ? '' : 'disabled'}>Redo corners</button><button type="button" class="btn" data-action="captureCancel">Cancel</button></div>`;
+      <div class="action-bar">${c.lastCorners && !c.corners.length ? '<button type="button" class="btn" data-action="captureLastCorners">Same spot as last time</button>' : ''}${c.corners.length ? '<button type="button" class="btn" data-action="captureRedo">Start again</button>' : ''}<button type="button" class="btn" data-action="captureCancel">Cancel</button></div>`;
   }
   if (c.step === 'confirm') {
-    return `<article class="verdict"><p class="v-line">Check the green grid sits on the squares, with a1 and h8 in the right corners. Then set up the pieces.</p>
+    const k = c.check || { ok: false, wrong: 0, separation: 0 };
+    const note = c.settling
+      ? '<p class="v-line"><span class="thinking">Found the board. Checking the pieces</span></p>'
+      : k.ok
+      ? '<p class="v-line"><b class="pos">All 32 pieces found.</b> White and black dots show what the camera reads on each square.</p>'
+      : k.wrong > 12
+        ? '<p class="v-line"><b class="neg">Set up the starting position.</b> The board is found; recording starts from the starting position. If the pieces are set up and White is on the wrong side, tap Turn board.</p>'
+        : k.wrong
+        ? `<p class="v-line"><b class="neg">${k.wrong} square${k.wrong === 1 ? ' reads' : 's read'} wrong</b> (ringed in red). Check the grid sits on the squares and every piece is on its starting square. This updates as you fix it; if the light changed, tap Re-learn colours.</p>`
+        : '<p class="v-line"><b class="neg">The pieces are hard to tell from the squares.</b> More light, or a steeper angle from above, helps. You can still try.</p>';
+    return `<article class="verdict tone-${k.ok ? 'dominant' : 'passive'}">${note}
       <div class="field"><span class="label">You are playing</span>${chipGroup('captureMe', [{ value: 'w', text: 'White' }, { value: 'b', text: 'Black' }, { value: 'none', text: 'Just recording' }], state.captureMe)}</div></article>
+      <div class="chips rec-toggles">${camViewChip(c)}</div>
       <div id="cam-slot"></div>
-      <div class="action-bar"><button type="button" class="btn primary" data-action="captureStart">Start recording</button><button type="button" class="btn" data-action="captureRedo">Redo corners</button></div>`;
+      <div class="action-bar"><button type="button" class="btn primary" data-action="captureStart">Start recording</button><button type="button" class="btn" data-action="captureRecheck">Re-learn colours</button><button type="button" class="btn" data-action="captureTurn">Turn board</button><button type="button" class="btn" data-action="captureRedo">Find again</button></div>`;
   }
   const hist = c.chess.history({ verbose: true });
   const plies = hist.map((m, i) => ({ san: m.san, color: m.color, fullmove: Math.floor(i / 2) + 1 }));
@@ -780,10 +802,34 @@ function capturePanel() {
       <p class="status" id="copy-status"></p></article>${moveStrip(plies, -1)}`;
   }
   const ask = c.candidates
-    ? `<article class="verdict tone-passive"><p class="v-line">${esc(c.status)}</p>${c.candidates.length ? `<div class="chips">${c.candidates.map((x, i) => `<button type="button" data-action="capturePick" data-i="${i}">${esc(x.move.san)}</button>`).join('')}</div>` : ''}<p class="small muted">Or play the move on the board above.</p><button type="button" class="btn small" data-action="captureDismiss">Nothing was played</button></article>`
-    : `<div class="status-row"><span class="${c.status === 'Hand over the board' ? 'thinking' : ''}">${esc(c.status)}</span><span class="small muted">Missed one? Play it on the board above.</span></div>`;
-  return `${ask}<div id="cam-slot" class="small-cam"></div>${moveStrip(plies, plies.length)}
+    ? `<article class="rec-status rec-ask"><span class="rec-dot" aria-hidden="true"></span><div><b>${esc(c.status)}</b>${c.candidates.length ? `<div class="chips">${c.candidates.map((x, i) => `<button type="button" data-action="capturePick" data-i="${i}">${esc(x.move.san)}</button>`).join('')}</div>` : ''}<span>Or play the move on the board above.</span><button type="button" class="btn small" data-action="captureDismiss">Nothing was played</button></div></article>`
+    : recStatus(c);
+  const toggles = `<div class="chips rec-toggles"><button type="button" data-action="captureSpeak" aria-pressed="${c.speak}">${c.speak ? 'Saying moves' : 'Moves muted'}</button>${c.showCamera ? camViewChip(c) : ''}<button type="button" data-action="captureCamera" aria-pressed="${c.showCamera}">${c.showCamera ? 'Hide camera' : 'Show camera'}</button></div>`;
+  return `${ask}${moveStrip(plies, plies.length)}${toggles}<div id="cam-slot" ${c.showCamera ? '' : 'hidden'}></div>
     <div class="action-bar"><button type="button" class="btn" data-action="captureUndo" ${hist.length ? '' : 'disabled'}>Undo move</button><button type="button" class="btn primary" data-action="captureFinish">Finish</button></div>`;
+}
+
+// Straightened board view, or the camera as it is.
+function camViewChip(c) {
+  return c.view === 'board'
+    ? '<button type="button" data-action="captureView" data-value="camera">Camera view</button>'
+    : '<button type="button" data-action="captureView" data-value="board">Board view</button>';
+}
+
+// The big live status while recording.
+function recStatus(c) {
+  const toMove = `${sideName(c.chess.turn())} to move`;
+  if (c.status === 'Watching the board' && c.lastPlayed) {
+    return `<article class="rec-status rec-played" data-key="${c.chess.history().length}"><span class="rec-dot" aria-hidden="true"></span><div><b>Played <span class="mono">${esc(c.lastPlayed.san)}</span></b><span>${toMove}. Watching for the next move.</span></div></article>`;
+  }
+  const kinds = {
+    'Hand over the board': ['busy', 'Hand over the board', 'It reads the move once your hand is clear.'],
+    'Reading the move': ['busy', 'Reading the move', 'Hold on a moment.'],
+    'Finding the board': ['busy', 'Finding the board', 'Point the camera back at the board. It locks on again by itself.'],
+    'Took back the last move. Put the pieces back on the board.': ['busy', 'Took back the last move', 'Put the pieces back where they were.'],
+  };
+  const [kind, title, sub] = kinds[c.status] || ['live', c.chess.history().length ? 'Watching the board' : 'Ready. Make the first move', c.chess.history().length ? toMove : 'White moves first. Missed one? Play it on the board above.'];
+  return `<article class="rec-status rec-${kind}"><span class="rec-dot" aria-hidden="true"></span><div><b>${esc(title)}</b><span>${esc(sub)}</span></div></article>`;
 }
 
 function captureNames() {
@@ -796,13 +842,19 @@ function captureNames() {
 const CAPTURE_ACTIONS = {
   startCapture: () => {
     if (state.check) state.check.cancelled = true;
-    state.capture = new CaptureSession({ onChange: () => { if (state.screen === 'play') render(); } });
+    state.capture = new CaptureSession({ onChange: () => { if (state.screen === 'play') render(); }, memory: store });
     state.flipped = false;
     render();
     state.capture.open();
   },
   captureRedo: () => state.capture.redoCorners(),
   captureStart: () => state.capture.start(),
+  captureRecheck: () => state.capture.recheck(),
+  captureTurn: () => state.capture.turnBoard(),
+  captureLastCorners: () => state.capture.useLastCorners(),
+  captureSpeak: () => state.capture.setSpeak(!state.capture.speak),
+  captureCamera: () => state.capture.toggleCamera(),
+  captureView: (b) => state.capture.setView(b.dataset.value),
   capturePick: (b) => { const x = state.capture.candidates[Number(b.dataset.i)]; if (x) state.capture.play(x.move); },
   captureDismiss: () => state.capture.dismiss(),
   captureUndo: () => state.capture.undo(),
