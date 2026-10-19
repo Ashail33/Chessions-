@@ -225,6 +225,11 @@ const WRONG = 9;
 // Squares squashed to under this along the view (see readFeatures' aspect):
 // the camera is low enough for tall pieces to hide the squares behind them.
 export const LOW_CAMERA = 0.8;
+// The trained square model (squarenet.js), when its answer is attached to the
+// features as `net`: its say is up to this many times -ln p per square, cut
+// off at NET_CAP so one very sure square can't outweigh everything.
+const NET_WEIGHT = 2;
+const NET_CAP = 10;
 const READ_GRID = 6;
 const READ_INSET = 0.25;
 const lumOf = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
@@ -425,6 +430,23 @@ export class BoardReader {
     // squares a move changed.
     this.lastLook = feat.slice();
     this.lastValid = valid.slice();
+    // How far to trust the trained model on this board, in this view: what
+    // share of the squares of this known position it gets right. It was
+    // trained on real photos and reads them about 99% right; on a board unlike
+    // any it saw it may do worse, and then the colours decide alone.
+    if (features.net) {
+      let right = 0;
+      let n = 0;
+      for (let sq = 0; sq < 64; sq++) {
+        if (!valid[sq]) continue;
+        const lp = features.net.subarray(sq * 3, sq * 3 + 3);
+        const best = lp[0] >= lp[1] && lp[0] >= lp[2] ? 0 : lp[1] >= lp[2] ? 1 : 2;
+        n++;
+        if (OCC[best] === occ[sq]) right++;
+      }
+      const trust = n ? Math.min(1, Math.max(0, (right / n - 0.9) / 0.07)) : 0;
+      this.netTrust = this.netTrust === undefined || blend >= 1 ? trust : blend * trust + (1 - blend) * this.netTrust;
+    }
     for (let sq = 0; sq < 64; sq++) {
       if (occ[sq] !== 'e' || !valid[sq]) continue;
       const now = feat.slice(sq * NF, sq * NF + NF);
@@ -487,6 +509,8 @@ export class BoardReader {
     const labels = new Array(64);
     const unknown = new Uint8Array(64);
     const change = changeSince(feat, valid, this.lastLook, this.lastValid);
+    const netWeight = NET_WEIGHT * (this.netTrust || 0);
+    const net = features.net && netWeight > 0 ? features.net : null;
     for (let sq = 0; sq < 64; sq++) {
       const classes = this.model[isLight(sq) ? 1 : 0];
       let best = 0;
@@ -502,6 +526,7 @@ export class BoardReader {
           for (let i = 0; i < NF; i++) e += ((feat[sq * NF + i] - own[i]) / c.sd[i]) ** 2;
           d = Math.min(d, e);
         }
+        if (net) d += netWeight * Math.min(NET_CAP, -net[sq * 3 + o]);
         dist[sq * 3 + o] = d;
         if (dist[sq * 3 + o] < dist[sq * 3 + best]) best = o;
       }

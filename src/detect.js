@@ -209,6 +209,16 @@ function findCrossings(gray) {
 // crossings } or null. info, if given, is filled in with how far it got
 // ({ crossings, lattice }), for telling the user what to fix.
 export function detectBoard(img, info = {}) {
+  // A degenerate fit somewhere along the way (points in a line) just means no
+  // board in this frame.
+  try {
+    return findBoard(img, info);
+  } catch {
+    return null;
+  }
+}
+
+function findBoard(img, info) {
   const gray = toGray(img);
   const pts = findCrossings(gray);
   info.crossings = pts.length;
