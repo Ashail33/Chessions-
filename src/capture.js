@@ -11,6 +11,7 @@ export const CORNER_ORDER = ['a8', 'h8', 'h1', 'a1'];
 const SAMPLE_WIDTH = 480;
 const RECT = 320; // board view size in pixels
 const RECT_MARGIN = 0.3; // squares of border shown around the board
+const CHANGE_SHOWN = 0.3; // share of a square changed before it is shown
 
 // Spoken form of a move, so you know it was recorded without looking.
 const PIECE_WORDS = { N: 'knight', B: 'bishop', R: 'rook', Q: 'queen', K: 'king' };
@@ -465,6 +466,13 @@ export class CaptureSession {
     if (this.candidates) return;
     const r = this.watcher.feed(this.reading, occ, this.chess.moves({ verbose: true }), performance.now());
     if (r.state === 'blocked') return this.setStatus('Hand over the board');
+    // The light changed (a shadow, a cloud) but no piece did: after a second
+    // of that, learn the colours again in the new light.
+    this.relightTicks = r.relight ? (this.relightTicks || 0) + 1 : 0;
+    if (this.relightTicks >= 6) {
+      this.relightTicks = 0;
+      this.relearn(features);
+    }
     if (r.state === 'still') return this.setStatus('Watching the board');
     if (r.state === 'waiting') return this.setStatus('Reading the move');
     if (r.state === 'move') {
@@ -556,6 +564,18 @@ export class CaptureSession {
       ctx.beginPath(); ctx.moveTo(...at(0, k)); ctx.lineTo(...at(8, k)); ctx.stroke();
     }
     if (!this.reading) return;
+    // While recording, squares that changed since the last move are washed
+    // amber, stronger the more of the square changed: you can see a piece
+    // landing or leaving register before the move is taken.
+    if (this.step === 'recording' && this.reading.pct) {
+      for (let sq = 0; sq < 64; sq++) {
+        const p = this.reading.pct[sq];
+        if (p < CHANGE_SHOWN) continue;
+        const [x0, y0] = at(sq & 7, 7 - (sq >> 3));
+        ctx.fillStyle = `rgba(232, 160, 40, ${Math.min(0.55, p * 0.7).toFixed(2)})`;
+        ctx.fillRect(x0, y0, q, q);
+      }
+    }
     for (let sq = 0; sq < 64; sq++) {
       const [x, y] = at((sq & 7) + 0.5, 7 - (sq >> 3) + 0.5);
       const label = (this.shown || this.reading.labels)[sq];

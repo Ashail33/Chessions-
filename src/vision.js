@@ -230,7 +230,25 @@ export const LOW_CAMERA = 0.8;
 // off at NET_CAP so one very sure square can't outweigh everything.
 const NET_WEIGHT = 2;
 const NET_CAP = 10;
+// Per-square change (squareChange): a point has changed when its colour moved
+// by over CHANGE_NOISE times the frame's typical change (and CHANGE_MIN). A
+// square a move fills or empties should have at least CHANGE_EXPECT of its
+// points changed; one it leaves alone at most CHANGE_STILL. A square fully
+// off costs CHANGE_WEIGHT, or CHANGE_MISSING of that where change is missing
+// rather than unexplained.
+const CHANGE_MIN = 12;
+const CHANGE_NOISE = 3;
+const CHANGE_EXPECT = 0.35;
+const CHANGE_STILL = 0.25;
+const CHANGE_WEIGHT = 16;
+const CHANGE_MISSING = 0.35;
 const READ_GRID = 6;
+// Change is read on its own grid over the middle of each square (where a
+// piece's base stands), each point the mean of 3x3 pixels so wood grain and
+// a pixel of camera shake don't count as change.
+const CHANGE_GRID = 7;
+const CHANGE_INSET = 0.15;
+const PTS = CHANGE_GRID * CHANGE_GRID;
 const READ_INSET = 0.25;
 const lumOf = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
 export const isLight = (sq) => ((sq & 7) + (sq >> 3)) % 2 === 1;
@@ -271,6 +289,9 @@ export function readFeatures(img, H) {
   const raw = [];
   const [ux, uy] = farSide(H);
   const SHIFT = 0.15;
+  // Every sample point's colour too, to tell later point by point how much
+  // of the square changed (NaN where the point is off the picture).
+  const pix = new Float32Array(64 * PTS * 3).fill(NaN);
   for (let sq = 0; sq < 64; sq++) {
     const lum = [];
     let r = 0;
@@ -291,6 +312,22 @@ export function readFeatures(img, H) {
         lum.push(lumOf(data[k], data[k + 1], data[k + 2]));
       }
     }
+    for (let i = 0; i < CHANGE_GRID; i++) {
+      for (let j = 0; j < CHANGE_GRID; j++) {
+        const u = CHANGE_INSET + ((1 - 2 * CHANGE_INSET) * (i + 0.5)) / CHANGE_GRID;
+        const v = CHANGE_INSET + ((1 - 2 * CHANGE_INSET) * (j + 0.5)) / CHANGE_GRID;
+        const [x, y] = squarePoint(H, sq, u, v);
+        const px = Math.round(x);
+        const py = Math.round(y);
+        if (px < 1 || py < 1 || px >= width - 1 || py >= height - 1) continue;
+        const o = ((sq * CHANGE_GRID + i) * CHANGE_GRID + j) * 3;
+        for (let c = 0; c < 3; c++) {
+          let t = 0;
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) t += data[((py + dy) * width + px + dx) * 4 + c];
+          pix[o + c] = t / 9;
+        }
+      }
+    }
     lum.sort((x, y) => x - y);
     const n = lum.length || 1;
     const mean = lum.reduce((s, x) => s + x, 0) / n;
@@ -308,7 +345,7 @@ export function readFeatures(img, H) {
   const [ax, ay] = project(H, 4 + ux * 0.5, 4 + uy * 0.5);
   const [bx, by] = project(H, 4 + Math.abs(uy) * 0.5, 4 + Math.abs(ux) * 0.5);
   const aspect = Math.hypot(ax - cx, ay - cy) / (Math.hypot(bx - cx, by - cy) || 1);
-  return { feat, valid, far: [ux, uy], aspect };
+  return { feat, valid, far: [ux, uy], aspect, pix };
 }
 
 // Light is rarely even across a board (a window, a lamp), and exposure
@@ -430,6 +467,7 @@ export class BoardReader {
     // squares a move changed.
     this.lastLook = feat.slice();
     this.lastValid = valid.slice();
+    this.lastPix = features.pix ? features.pix.slice() : null;
     // How far to trust the trained model on this board, in this view: what
     // share of the squares of this known position it gets right. It was
     // trained on real photos and reads them about 99% right; on a board unlike
@@ -534,7 +572,7 @@ export class BoardReader {
       // Nothing like any learnt case: a hand, a shadow or a glare.
       unknown[sq] = !valid[sq] || dist[sq * 3 + best] > UNKNOWN ? 1 : 0;
     }
-    return { dist, labels, unknown, change, far, aspect };
+    return { dist, labels, unknown, change, far, aspect, ...squareChange(features.pix, this.lastPix) };
   }
 
   // Cost of believing the board holds occ: summed excess distance over the
@@ -578,6 +616,125 @@ function changeSince(feat, valid, last, lastValid) {
   return change;
 }
 
+// Point by point, how much of each square changed since the last known
+// position: the share of its sample points whose colour moved by more than
+// this frame's noise (most squares didn't change, so the typical change is
+// the noise), and how much brighter it got on average. A piece landing on a
+// square or leaving it changes most of the square, even where the colours
+// alone can't tell it apart (a cream piece on a cream square).
+function squareChange(pix, last) {
+  if (!pix || !last) return { pct: null, shift: null };
+  // Light: each square's own gain per colour channel (the median ratio of
+  // its points), so exposure drift or a shadow falling across the board,
+  // which dim a square evenly, don't count as change; a piece arriving or
+  // leaving changes the pattern within it.
+  const gains = new Float32Array(64 * 3).fill(1);
+  for (let sq = 0; sq < 64; sq++) {
+    for (let c = 0; c < 3; c++) {
+      const rs = [];
+      for (let k = 0; k < PTS; k++) {
+        const i = (sq * PTS + k) * 3 + c;
+        if (pix[i] > 8 && last[i] > 8) rs.push(last[i] / pix[i]);
+      }
+      if (rs.length) gains[sq * 3 + c] = quantile(rs.sort((a, b) => a - b), 0.5);
+    }
+  }
+  // Each point against the closest of itself and its neighbours as they
+  // were: a few pixels of camera shake then don't count, while a piece
+  // arriving or leaving changes the whole middle of the square.
+  const d = new Float32Array(64 * PTS).fill(NaN);
+  const all = [];
+  for (let sq = 0; sq < 64; sq++) {
+    for (let a = 0; a < CHANGE_GRID; a++) {
+      for (let b = 0; b < CHANGE_GRID; b++) {
+        const p = (sq * CHANGE_GRID + a) * CHANGE_GRID + b;
+        const i = p * 3;
+        if (Number.isNaN(pix[i])) continue;
+        const gain = gains.subarray(sq * 3, sq * 3 + 3);
+        let best = Infinity;
+        for (let da = -1; da <= 1; da++) {
+          for (let db = -1; db <= 1; db++) {
+            const aa = a + da;
+            const bb = b + db;
+            if (aa < 0 || bb < 0 || aa >= CHANGE_GRID || bb >= CHANGE_GRID) continue;
+            const j = ((sq * CHANGE_GRID + aa) * CHANGE_GRID + bb) * 3;
+            if (Number.isNaN(last[j])) continue;
+            best = Math.min(best, Math.hypot(pix[i] * gain[0] - last[j], pix[i + 1] * gain[1] - last[j + 1], pix[i + 2] * gain[2] - last[j + 2]));
+          }
+        }
+        if (best === Infinity) continue;
+        d[p] = best;
+        all.push(best);
+      }
+    }
+  }
+  const noise = all.length ? quantile(all.sort((a, b) => a - b), 0.5) : 0;
+  const threshold = Math.max(CHANGE_MIN, CHANGE_NOISE * noise);
+  const pct = new Float32Array(64);
+  const shift = new Float32Array(64);
+  for (let sq = 0; sq < 64; sq++) {
+    let n = 0;
+    let changed = 0;
+    let dl = 0;
+    const gain = gains.subarray(sq * 3, sq * 3 + 3);
+    for (let k = 0; k < PTS; k++) {
+      const p = sq * PTS + k;
+      if (Number.isNaN(d[p])) continue;
+      n++;
+      if (d[p] > threshold) changed++;
+      const i = p * 3;
+      dl += lumOf(pix[i], pix[i + 1], pix[i + 2]) - lumOf(last[i], last[i + 1], last[i + 2]);
+    }
+    pct[sq] = n ? changed / n : 0;
+    shift[sq] = n ? dl / n : 0;
+  }
+  // Intensity against the board as a whole, so exposure drift is taken out:
+  // up where a light piece landed or a dark one left, down the other way.
+  const mid = quantile([...shift].sort((a, b) => a - b), 0.5);
+  for (let sq = 0; sq < 64; sq++) shift[sq] -= mid;
+  return { pct, shift };
+}
+
+// Cost of believing a move took the board from occ to after, by the change
+// in each square: a square the move empties or fills that hardly changed, or
+// a square well away from the move that changed a lot. The squares round a
+// changed one are left out: a piece arriving or leaving casts or lifts a
+// shadow on its neighbours, and a tall one covers or uncovers part of the
+// square behind.
+export function changeCost(reading, occ, after) {
+  if (!reading.pct) return { cost: 0, wrong: 0, changed: 0 };
+  const moved = new Uint8Array(64);
+  for (let sq = 0; sq < 64; sq++) if (after[sq] !== occ[sq]) moved[sq] = 1;
+  const near = new Uint8Array(64);
+  for (let sq = 0; sq < 64; sq++) {
+    if (!moved[sq]) continue;
+    for (let df = -1; df <= 1; df++) {
+      for (let dr = -1; dr <= 1; dr++) {
+        const f = (sq & 7) + df;
+        const r = (sq >> 3) + dr;
+        if (f >= 0 && f < 8 && r >= 0 && r < 8) near[r * 8 + f] = 1;
+      }
+    }
+  }
+  let cost = 0;
+  let wrong = 0;
+  let changed = 0;
+  for (let sq = 0; sq < 64; sq++) {
+    if (reading.unknown[sq]) continue;
+    const p = reading.pct[sq];
+    if (!moved[sq] && !near[sq] && p >= CHANGE_EXPECT) changed++;
+    let bad = 0;
+    // Little change where the move says a piece came or went counts for
+    // less: a cream piece on a cream square changes it little. Change that
+    // nothing explains counts in full.
+    if (moved[sq]) bad = CHANGE_MISSING * Math.min(1, Math.max(0, (CHANGE_EXPECT - p) / CHANGE_EXPECT));
+    else if (!near[sq]) bad = Math.min(1, Math.max(0, (p - CHANGE_STILL) / 0.2));
+    cost += CHANGE_WEIGHT * bad;
+    if (bad > 0.6) wrong++;
+  }
+  return { cost, wrong, changed };
+}
+
 // Occupancy after a move, without needing a chess engine.
 export function occupancyAfter(occ, move) {
   const out = [...occ];
@@ -592,6 +749,13 @@ export function occupancyAfter(occ, move) {
   return out;
 }
 
+// Colours and change together.
+function withChange(reading, occ, after) {
+  const a = BoardReader.cost(reading, after);
+  const b = changeCost(reading, occ, after);
+  return { cost: a.cost + b.cost, wrong: a.wrong + b.wrong, changed: b.changed, colourCost: a.cost, changeCost: b.cost };
+}
+
 // Rank the legal moves (and "nothing happened") against a reading.
 export function rankByReading(reading, occ, moves) {
   const seen = new Map();
@@ -602,10 +766,10 @@ export function rankByReading(reading, occ, moves) {
     // How strongly the squares this move changes did change.
     let moved = 0;
     if (reading.change) for (let sq = 0; sq < 64; sq++) if (after[sq] !== occ[sq]) moved += reading.change[sq];
-    seen.set(key, { move: m, moved, ...BoardReader.cost(reading, after) });
+    seen.set(key, { move: m, moved, ...withChange(reading, occ, after) });
   }
   const ranked = [...seen.values()].sort((a, b) => a.cost - b.cost);
-  return { none: BoardReader.cost(reading, occ), ranked };
+  return { none: withChange(reading, occ, occ), ranked };
 }
 
 // Decides when a reading is a settled move.
@@ -648,9 +812,19 @@ export class MoveWatcher {
     // Squares of one move changed clearly, even if not enough to be sure:
     // don't call the board still, so it asks rather than miss the move.
     const hint = best && best.moved >= 12 && (!next || best.moved > 2 * next.moved);
-    if (!likely && !hint && none.wrong <= 1) {
+    // A square that clearly changed with nothing to explain it (a cream piece
+    // on a cream square can show only as its shadow moving) also keeps the
+    // board from being called still, so the app asks rather than misses it.
+    if (!likely && !hint && none.wrong <= 1 && !none.changed) {
       this.reset();
       return { state: 'still' };
+    }
+    // The colours say something changed, yet no square's pattern did: the
+    // light changed (a shadow, a cloud), not a piece. Say so, so the colours
+    // can be learnt again in the new light.
+    if (!strong && reading.pct && Math.max(...reading.pct) < CHANGE_STILL) {
+      this.reset();
+      return { state: 'still', relight: true };
     }
     // Something changed. Is it clearly one move?
     let key = 'unclear';

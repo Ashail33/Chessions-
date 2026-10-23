@@ -14,14 +14,19 @@ const LOW = [[150, 150], [330, 150], [455, 385], [25, 385]];
 // Each setup: [name, renderer options, corners, most moves it may ask about,
 // most it may get wrong, share of squares a stand-in for the trained square
 // model reads wrong (none: colours only)]
-for (const [name, opts, corners, maxAsked, maxWrong, netWrong] of [
+const ITALIAN = ['e4', 'e5', 'Nf3', 'Nc6', 'Bc4', 'Bc5', 'O-O', 'Nf6', 'd3', 'd6', 'Bg5', 'h6', 'Bxf6', 'Qxf6', 'Nc3', 'Bg4'];
+const RUY = ['e4', 'e5', 'Nf3', 'Nc6', 'Bb5', 'a6', 'Ba4', 'Nf6', 'O-O', 'Be7', 'Re1', 'b5', 'Bb3', 'd6'];
+for (const [name, opts, corners, maxAsked, maxWrong, netWrong, line = ITALIAN] of [
   ['from overhead, wooden board', { overhead: true, wood: true }, TOP, 2, 0],
   ['at a normal angle, wooden board', { wood: true }, CORNERS, 2, 0],
-  ['from low down, wooden board', { wood: true }, LOW, 3, 1],
+  ['from low down, wooden board', { wood: true }, LOW, 3, 0],
   ['at a normal angle, plain board', { realistic: true, shake: 1 }, CORNERS, 1, 0],
   // The model reads real photos about 99% right; at 97% it already sorts out
   // the low view above.
   ['from low down, wooden board, with the square model', { wood: true }, LOW, 0, 0, 0.03],
+  // A cream bishop on light wooden squares hardly shows in the colours; the
+  // change in its squares (and its shadow) catches it.
+  ['at a normal angle, wooden board, cream bishop moves', { wood: true }, CORNERS, 4, 0, undefined, RUY],
 ]) {
  test(`records moves ${name}`, () => {
   const H = boardHomography(corners);
@@ -33,7 +38,6 @@ for (const [name, opts, corners, maxAsked, maxWrong, netWrong] of [
   };
   const reader = new BoardReader(); reader.train(frame(), occupancy(chess));
   const watcher = new MoveWatcher();
-  const line = ['e4', 'e5', 'Nf3', 'Nc6', 'Bc4', 'Bc5', 'O-O', 'Nf6', 'd3', 'd6', 'Bg5', 'h6', 'Bxf6', 'Qxf6', 'Nc3', 'Bg4'];
   const got = []; let t = 0;
   for (const san of line) {
     const before = new Chess(chess.fen());
